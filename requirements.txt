@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+python-multipart
+requests
+psutil
+websockets
+# pydantic-core dependency is handled via setup.sh with --extra-index-url
