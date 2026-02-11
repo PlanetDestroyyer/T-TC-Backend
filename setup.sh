@@ -4,7 +4,6 @@ echo "Installing TinyCell Dependencies..."
 termux-setup-storage
 pkg update -y && pkg upgrade -y
 pkg install python git rust binutils -y
-pkg install python-pydantic -y || echo "Pre-built pydantic not found, will build from source..."
 
 echo "Installing Python Dependencies..."
 echo "Setting up Virtual Environment..."
