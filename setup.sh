@@ -7,8 +7,23 @@ pkg install python git rust binutils -y
 pkg install python-pydantic -y || echo "Pre-built pydantic not found, will build from source..."
 
 echo "Installing Python Dependencies..."
+echo "Setting up Virtual Environment..."
+python -m venv venv
+source venv/bin/activate
+
 echo "Installing Python Dependencies..."
+# We use the termux wheel repo for pydantic-core to avoid compiling rust
 pip install --extra-index-url https://termux-user-repository.github.io/pypi/ pydantic-core
 pip install -r requirements.txt
 
-echo "Setup Complete. Run 'python agent.py' to start the agent."
+# Create a simple start script
+echo "#!/bin/bash" > start.sh
+echo "cd \$(dirname \$0)" >> start.sh
+echo "./venv/bin/python agent.py" >> start.sh
+chmod +x start.sh
+
+echo "Setup Complete!"
+echo "-----------------------------------------------"
+echo "Run this command to start the agent:"
+echo "./start.sh"
+echo "-----------------------------------------------"
