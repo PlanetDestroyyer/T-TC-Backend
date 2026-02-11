@@ -39,12 +39,21 @@ def get_system_stats():
         pass
 
     if not battery_info:
-        battery = psutil.sensors_battery()
-        if battery:
+        try:
+            battery = psutil.sensors_battery()
+            if battery:
+                battery_info = {
+                    "percentage": battery.percent,
+                    "plugged": battery.power_plugged,
+                    "status": "charging" if battery.power_plugged else "discharging"
+                }
+        except (PermissionError, AttributeError):
+            # Termux on Android restricts access to /sys/class/power_supply
+            # Provide fallback values
             battery_info = {
-                "percentage": battery.percent,
-                "plugged": battery.power_plugged,
-                "status": "charging" if battery.power_plugged else "discharging"
+                "percentage": 0,
+                "plugged": False,
+                "status": "unavailable"
             }
 
     return {
