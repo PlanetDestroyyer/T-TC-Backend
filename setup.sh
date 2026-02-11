@@ -3,7 +3,7 @@
 echo "Installing TinyCell Dependencies..."
 termux-setup-storage
 pkg update -y && pkg upgrade -y
-pkg install python git rust binutils -y
+pkg install python git rust binutils termux-api -y
 
 echo "Installing Python Dependencies..."
 echo "Setting up Virtual Environment..."
