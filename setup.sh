@@ -19,6 +19,12 @@ pip install -r requirements.txt
 # Create a simple start script
 echo "#!/bin/bash" > start.sh
 echo "cd \$(dirname \$0)" >> start.sh
+echo "echo '✅ Local Agent Started!'" >> start.sh
+echo "echo '---------------------------------------------------'" >> start.sh
+echo "echo '📱 NOW: Return to the TinyCell App'" >> start.sh
+echo "echo '👆 Press \"I'\'ve Run The Command\"'" >> start.sh
+echo "echo '⏳ Wait a few seconds for connection...'" >> start.sh
+echo "echo '---------------------------------------------------'" >> start.sh
 echo "./venv/bin/python agent.py" >> start.sh
 chmod +x start.sh
 
