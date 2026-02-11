@@ -47,14 +47,24 @@ def get_system_stats():
                     "plugged": battery.power_plugged,
                     "status": "charging" if battery.power_plugged else "discharging"
                 }
-        except (PermissionError, AttributeError):
-            # Termux on Android restricts access to /sys/class/power_supply
-            # Provide fallback values
+        except Exception:
             battery_info = {
                 "percentage": 0,
                 "plugged": False,
                 "status": "unavailable"
             }
+
+    # Memory info with fallback
+    try:
+        memory_info = dict(psutil.virtual_memory()._asdict())
+    except Exception:
+        memory_info = {"total": 0, "available": 0, "percent": 0}
+
+    # Disk info with fallback
+    try:
+        disk_info = dict(psutil.disk_usage('/')._asdict())
+    except Exception:
+        disk_info = {"total": 0, "free": 0, "percent": 0}
 
     return {
         "status": "online",
@@ -64,8 +74,8 @@ def get_system_stats():
         "processor": run_command("getprop ro.product.board") or platform.processor(),
         "android_version": run_command("getprop ro.build.version.release"),
         "battery": battery_info,
-        "memory": dict(psutil.virtual_memory()._asdict()),
-        "disk": dict(psutil.disk_usage('/')._asdict())
+        "memory": memory_info,
+        "disk": disk_info
     }
 
 @app.get("/status")
