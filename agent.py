@@ -125,14 +125,27 @@ def scan_hardware():
 # --- WebSocket for Real-Time Stats ---
 @app.websocket("/ws/status")
 async def websocket_status(websocket: WebSocket):
+    print("🔌 WebSocket connection attempt...")
     await websocket.accept()
+    print("✅ WebSocket accepted!")
+    
     try:
+        # Send immediate welcome message
+        await websocket.send_json({"message": "Connected!", "status": "ok"})
+        print("📤 Sent welcome message")
+        
         while True:
             stats = get_system_stats()
+            print(f"📤 Sending stats: {stats.get('status')}")
             await websocket.send_json(stats)
-            await asyncio.sleep(2) # Send updates every 2 seconds
+            await asyncio.sleep(2)
+            
     except WebSocketDisconnect:
-        print("Client disconnected")
+        print("🔌 Client disconnected")
+    except Exception as e:
+        print(f"❌ WebSocket error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
 
 # --- File Browser (NAS Foundation) ---
 @app.get("/files/{path:path}")
@@ -200,8 +213,8 @@ if __name__ == "__main__":
         
         # Run HTTP server on 0.0.0.0 (required for WiFi IP access)
         print(f"🔓 HTTP server starting on http://{device_ip}:8000")
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug")
     else:
         print("⚠️  SSL certs not found - running HTTP only")
         print("=" * 60)
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug")
