@@ -9,6 +9,8 @@ import subprocess
 import json
 import asyncio
 import ssl
+import uvicorn
+from threading import Thread
 
 app = FastAPI()
 
@@ -97,7 +99,7 @@ def get_status():
 
 @app.get("/ip")
 def get_ip():
-    """Return device IP so the app can auto-discover it"""
+    """Return device IP for information purposes"""
     return {"ip": get_device_ip()}
 
 @app.get("/scan")
@@ -158,23 +160,44 @@ def list_files(path: str):
         
     return JSONResponse(status_code=404, content={"error": "Not found"})
 
-if __name__ == "__main__":
-    import uvicorn
+def run_https_server():
+    """Run HTTPS server for browser access"""
+    cert_file = os.path.join(os.path.dirname(__file__), "cert.pem")
+    key_file = os.path.join(os.path.dirname(__file__), "key.pem")
     
+    if os.path.exists(cert_file) and os.path.exists(key_file):
+        device_ip = get_device_ip()
+        print(f"🔒 HTTPS server starting on https://{device_ip}:8443")
+        uvicorn.run(app, host="0.0.0.0", port=8443,
+                    ssl_keyfile=key_file, ssl_certfile=cert_file,
+                    log_level="warning")
+    else:
+        print("⚠️  No SSL certs - HTTPS disabled. Browser access unavailable.")
+
+if __name__ == "__main__":
     cert_file = os.path.join(os.path.dirname(__file__), "cert.pem")
     key_file = os.path.join(os.path.dirname(__file__), "key.pem")
     
     device_ip = get_device_ip()
     
+    print("=" * 60)
+    print("🚀 TinyCell Agent - Dual Server Mode")
+    print("=" * 60)
+    print(f"📱 Device IP: {device_ip}")
+    print(f"📲 App Access:     http://127.0.0.1:8000/status")
+    
     if os.path.exists(cert_file) and os.path.exists(key_file):
-        # HTTPS mode - accessible from other apps
-        print(f"🔒 Starting HTTPS server...")
-        print(f"📱 Device IP: {device_ip}")
-        print(f"🌐 Access: https://{device_ip}:8443/status")
-        uvicorn.run(app, host="0.0.0.0", port=8443,
-                    ssl_keyfile=key_file, ssl_certfile=cert_file)
+        print(f"🌐 Browser Access: https://{device_ip}:8443/status")
+        print("=" * 60)
+        
+        # Start HTTPS server in background thread
+        https_thread = Thread(target=run_https_server, daemon=True)
+        https_thread.start()
+        
+        # Run HTTP server on localhost for app
+        print("🔓 HTTP server starting on http://127.0.0.1:8000")
+        uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
     else:
-        # Fallback to HTTP
-        print(f"⚠️  No SSL certs found. Running HTTP only (limited access).")
-        print(f"Run setup.sh to generate SSL certificates.")
-        uvicorn.run(app, host="0.0.0.0", port=8000)
+        print("⚠️  SSL certs not found - running HTTP only")
+        print("=" * 60)
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
