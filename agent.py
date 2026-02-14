@@ -23,12 +23,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def run_command(command):
+def run_command(command, timeout=2):
     """Run a shell command and return the output"""
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        # Add timeout to prevent hanging forever
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
         return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        print(f"⚠️ Command timed out: {command}")
+        return ""
     except Exception as e:
+        print(f"❌ Command failed: {command} - {e}")
         return str(e)
 
 def get_device_ip():
@@ -46,12 +51,14 @@ def get_device_ip():
 def get_system_stats():
     """Get comprehensive device status"""
     battery_info = {}
+    print("  STATS: Getting battery...")
     try:
         battery_output = run_command("termux-battery-status")
         if battery_output and battery_output.strip().startswith("{"):
              battery_info = json.loads(battery_output)
     except:
         pass
+    print("  STATS: Battery done")
 
     if not battery_info:
         try:
@@ -137,6 +144,7 @@ async def websocket_status(websocket: WebSocket):
         while True:
             # Use asyncio.to_thread to run the blocking get_system_stats function
             # This prevents the main event loop from blocking
+            print("🔄 Loop: Fetching stats...")
             stats = await asyncio.to_thread(get_system_stats)
             
             print(f"📤 Sending stats: {stats.get('status')}")
