@@ -15,7 +15,7 @@ echo "Installing Python Dependencies..."
 pip install --no-cache-dir --upgrade pip
 pip install --no-cache-dir -r requirements.txt
 
-# Generate SSL certificate for HTTPS (required for Android app communication)
+# Generate SSL certificate for HTTPS (required for Browser/External access)
 echo "Generating SSL Certificate..."
 if [ ! -f cert.pem ] || [ ! -f key.pem ]; then
     openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes \

@@ -93,6 +93,10 @@ def get_system_stats():
         "disk": disk_info
     }
 
+@app.get("/")
+def read_root():
+    return {"status": "ok", "message": "TinyCell Agent is Running"}
+
 @app.get("/status")
 def get_status():
     return get_system_stats()
