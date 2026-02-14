@@ -30,8 +30,8 @@ fi
 echo "#!/bin/bash" > start.sh
 echo "cd \$(dirname \$0)" >> start.sh
 echo "" >> start.sh
-echo "# Get device IP" >> start.sh
-echo "DEVICE_IP=\$(ifconfig wlan0 2>/dev/null | grep 'inet ' | awk '{print \$2}')" >> start.sh
+echo "# Get device IP using Python (most reliable)" >> start.sh
+echo 'DEVICE_IP=$(./venv/bin/python -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect((\"8.8.8.8\", 80)); print(s.getsockname()[0]); s.close()" 2>/dev/null)' >> start.sh
 echo 'if [ -z "$DEVICE_IP" ]; then DEVICE_IP="unknown"; fi' >> start.sh
 echo "" >> start.sh
 echo "echo '✅ Local Agent Started!'" >> start.sh

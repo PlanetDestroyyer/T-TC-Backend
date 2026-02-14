@@ -31,13 +31,15 @@ def run_command(command):
 
 def get_device_ip():
     """Get the device's WiFi IP address"""
+    import socket
     try:
-        output = run_command("ifconfig wlan0 2>/dev/null | grep 'inet ' | awk '{print $2}'")
-        if output:
-            return output
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
     except:
-        pass
-    return "unknown"
+        return "unknown"
 
 def get_system_stats():
     """Get comprehensive device status"""
