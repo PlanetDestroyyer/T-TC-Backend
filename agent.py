@@ -135,7 +135,10 @@ async def websocket_status(websocket: WebSocket):
         print("📤 Sent welcome message")
         
         while True:
-            stats = get_system_stats()
+            # Use asyncio.to_thread to run the blocking get_system_stats function
+            # This prevents the main event loop from blocking
+            stats = await asyncio.to_thread(get_system_stats)
+            
             print(f"📤 Sending stats: {stats.get('status')}")
             await websocket.send_json(stats)
             await asyncio.sleep(2)
