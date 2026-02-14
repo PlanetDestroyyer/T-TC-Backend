@@ -8,10 +8,11 @@ import psutil
 import subprocess
 import json
 import asyncio
+import ssl
 
 app = FastAPI()
 
-# Enable CORS for React Native (although local access is usually fine)
+# Enable CORS for React Native
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,6 +28,16 @@ def run_command(command):
         return result.stdout.strip()
     except Exception as e:
         return str(e)
+
+def get_device_ip():
+    """Get the device's WiFi IP address"""
+    try:
+        output = run_command("ifconfig wlan0 2>/dev/null | grep 'inet ' | awk '{print $2}'")
+        if output:
+            return output
+    except:
+        pass
+    return "unknown"
 
 def get_system_stats():
     """Get comprehensive device status"""
@@ -81,6 +92,11 @@ def get_system_stats():
 @app.get("/status")
 def get_status():
     return get_system_stats()
+
+@app.get("/ip")
+def get_ip():
+    """Return device IP so the app can auto-discover it"""
+    return {"ip": get_device_ip()}
 
 @app.get("/scan")
 def scan_hardware():
@@ -142,5 +158,21 @@ def list_files(path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    # Listen on 0.0.0.0 for actual network access
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    cert_file = os.path.join(os.path.dirname(__file__), "cert.pem")
+    key_file = os.path.join(os.path.dirname(__file__), "key.pem")
+    
+    device_ip = get_device_ip()
+    
+    if os.path.exists(cert_file) and os.path.exists(key_file):
+        # HTTPS mode - accessible from other apps
+        print(f"🔒 Starting HTTPS server...")
+        print(f"📱 Device IP: {device_ip}")
+        print(f"🌐 Access: https://{device_ip}:8443/status")
+        uvicorn.run(app, host="0.0.0.0", port=8443,
+                    ssl_keyfile=key_file, ssl_certfile=cert_file)
+    else:
+        # Fallback to HTTP
+        print(f"⚠️  No SSL certs found. Running HTTP only (limited access).")
+        print(f"Run setup.sh to generate SSL certificates.")
+        uvicorn.run(app, host="0.0.0.0", port=8000)
