@@ -194,9 +194,9 @@ if __name__ == "__main__":
         https_thread = Thread(target=run_https_server, daemon=True)
         https_thread.start()
         
-        # Run HTTP server on localhost for app
-        print("🔓 HTTP server starting on http://127.0.0.1:8000")
-        uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+        # Run HTTP server on 0.0.0.0 (required for WiFi IP access)
+        print(f"🔓 HTTP server starting on http://{device_ip}:8000")
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
     else:
         print("⚠️  SSL certs not found - running HTTP only")
         print("=" * 60)
