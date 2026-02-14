@@ -3,17 +3,17 @@
 echo "Installing TinyCell Dependencies..."
 termux-setup-storage
 pkg update -y && pkg upgrade -y
-pkg install python git rust binutils termux-api -y
+pkg install python git termux-api -y
 
-echo "Installing Python Dependencies..."
 echo "Setting up Virtual Environment..."
 python -m venv venv
 source venv/bin/activate
 
 echo "Installing Python Dependencies..."
-# We use the termux wheel repo for pydantic-core to avoid compiling rust
-pip install --extra-index-url https://termux-user-repository.github.io/pypi/ pydantic-core
-pip install -r requirements.txt
+# Install all dependencies at once - pip will handle pydantic-core automatically
+# Using --no-cache-dir to avoid storage issues and speed up installation
+pip install --no-cache-dir --upgrade pip
+pip install --no-cache-dir -r requirements.txt
 
 # Create a simple start script
 echo "#!/bin/bash" > start.sh
