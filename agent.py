@@ -23,7 +23,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def run_command(command, timeout=2):
+def run_command(command, timeout=1):
     """Run a shell command and return the output"""
     try:
         # Add timeout to prevent hanging forever
@@ -60,6 +60,22 @@ def get_system_stats():
         pass
     print("  STATS: Battery done")
 
+    # Fallback: Try reading directly from sysfs (works on many Androids even without root)
+    if not battery_info or battery_info.get("status") == "unavailable":
+        try:
+            # Note: This might fail on some devices without root, but works on many
+            capacity = run_command("cat /sys/class/power_supply/battery/capacity", timeout=0.5)
+            status_str = run_command("cat /sys/class/power_supply/battery/status", timeout=0.5)
+            if capacity and capacity.isdigit():
+                battery_info = {
+                    "percentage": int(capacity),
+                    "plugged": status_str.lower() != "discharging",
+                    "status": status_str.lower() if status_str else "unknown"
+                }
+        except Exception as e:
+            print(f"  STATS: Sysfs read failed: {e}")
+
+    # Final Fallback: psutil
     if not battery_info:
         try:
             battery = psutil.sensors_battery()
@@ -70,11 +86,15 @@ def get_system_stats():
                     "status": "charging" if battery.power_plugged else "discharging"
                 }
         except Exception:
-            battery_info = {
-                "percentage": 0,
-                "plugged": False,
-                "status": "unavailable"
-            }
+            pass
+
+    # Ensure we always have a struct
+    if not battery_info:
+         battery_info = {
+            "percentage": 0,
+            "plugged": False,
+            "status": "unavailable"
+        }
 
     # Memory info with fallback
     try:
@@ -83,16 +103,25 @@ def get_system_stats():
         memory_info = {"total": 0, "available": 0, "percent": 0}
 
     # Disk info with fallback
+    # Disk info - Use current directory (Termux home) for more relevant stats
     try:
-        disk_info = dict(psutil.disk_usage('/')._asdict())
+        disk_info = dict(psutil.disk_usage('.')._asdict())
     except Exception:
         disk_info = {"total": 0, "free": 0, "percent": 0}
 
+    # Get real device name
+    device_model = run_command("getprop ro.product.model") or platform.node()
+    device_man = run_command("getprop ro.product.manufacturer")
+    if device_man and device_model:
+        display_name = f"{device_man} {device_model}"
+    else:
+        display_name = device_model
+
     return {
         "status": "online",
-        "device_name": platform.node(),
+        "device_name": display_name,
         "machine": platform.machine(),
-        "system": platform.system(),
+        "system": "Android", # Explicitly state Android for UI
         "processor": run_command("getprop ro.product.board") or platform.processor(),
         "android_version": run_command("getprop ro.build.version.release"),
         "battery": battery_info,
