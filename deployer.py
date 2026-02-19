@@ -222,8 +222,7 @@ async def _run_update(deploy_id: str, app_id: str):
 
         step("Creating public URL...")
         secret = app.get("secret_path") or secrets.token_hex(4)
-        await _setup_proxy_and_tunnel(app_id, port, secret)
-        tunnel_url = _load()["apps"].get(app_id, {}).get("tunnel_url", "")
+        tunnel_url = await _setup_proxy_and_tunnel(app_id, port, secret) or ""
         step(f"URL: {tunnel_url or 'unavailable'}", done=True)
 
         reg = _load()
@@ -231,6 +230,7 @@ async def _run_update(deploy_id: str, app_id: str):
             reg["apps"][app_id]["status"] = "running"
             reg["apps"][app_id]["pid"] = proc.pid
             reg["apps"][app_id]["secret_path"] = secret
+            reg["apps"][app_id]["tunnel_url"] = tunnel_url
             _save(reg)
 
         _deployments[deploy_id]["status"] = "done"
@@ -276,15 +276,14 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         step("Server started", done=True)
 
         step("Creating public URL...")
-        secret = secrets.token_hex(4)   # 8-char hex — e.g. f8a2d91c
-        await _setup_proxy_and_tunnel(app_name, port, secret)
+        secret = secrets.token_hex(4)
+        tunnel_url = await _setup_proxy_and_tunnel(app_name, port, secret) or ""
+        step(f"URL: {tunnel_url or 'unavailable'}", done=True)
+
         _pids[app_name] = {"app_pid": proc.pid}
         running_apps[app_name] = proc.pid
 
         reg = _load()
-        tunnel_url = reg["apps"].get(app_name, {}).get("tunnel_url", "")
-        step(f"URL: {tunnel_url or 'unavailable'}", done=True)
-
         reg["apps"][app_name] = {
             "id": app_name,
             "name": app_name,
@@ -492,6 +491,7 @@ async def _setup_proxy_and_tunnel(app_id: str, app_port: int, secret: str):
         reg["apps"][app_id]["tunnel_url"] = full_url
         _save(reg)
     print(f"🌐 Tunnel+Proxy ready for '{app_id}': {full_url}")
+    return full_url
 
 
 
