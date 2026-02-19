@@ -1,7 +1,9 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import os
+import signal
 import platform
 import shutil
 import psutil
@@ -9,8 +11,10 @@ import subprocess
 import json
 import asyncio
 import ssl
+import time
 import uvicorn
 from threading import Thread
+import deployer
 
 app = FastAPI()
 
@@ -48,34 +52,155 @@ def get_device_ip():
     except:
         return "unknown"
 
+# ─── Thermal Management ───────────────────────────────────────────────────────
+
+TEMP_WARM     = 43   # Warn user
+TEMP_HOT      = 46   # Heavy warn + block deploys
+TEMP_CRITICAL = 50   # Emergency: kill all apps
+
+# Shared with deployer — populated when apps are deployed/started
+running_apps = deployer.running_apps
+
+# Last known thermal state (read by /thermal endpoint)
+thermal_state: dict = {"temp": 0.0, "level": "normal", "last_check": 0}
+
+
+def get_temperature() -> float:
+    """Return device temperature in Celsius. Tries battery API then sysfs."""
+    # Method 1: termux-battery-status (most accurate, returns battery temp)
+    try:
+        output = run_command("termux-battery-status", timeout=2)
+        if output and output.strip().startswith("{"):
+            data = json.loads(output)
+            temp = data.get("temperature")
+            if temp and float(temp) > 0:
+                return float(temp)
+    except Exception:
+        pass
+
+    # Method 2: sysfs thermal zones (CPU temp, millidegrees → Celsius)
+    try:
+        zones_raw = run_command("ls /sys/class/thermal/", timeout=0.5)
+        for zone in zones_raw.split():
+            if zone.startswith("thermal_zone"):
+                raw = run_command(f"cat /sys/class/thermal/{zone}/temp", timeout=0.5)
+                if raw and raw.lstrip("-").isdigit():
+                    temp = int(raw) / 1000.0
+                    if 20.0 <= temp <= 85.0:   # sanity range
+                        return temp
+    except Exception:
+        pass
+
+    return 0.0
+
+
+def _thermal_level(temp: float) -> str:
+    if temp >= TEMP_CRITICAL:
+        return "emergency"
+    if temp >= TEMP_HOT:
+        return "critical"
+    if temp >= TEMP_WARM:
+        return "hot"
+    if temp >= 40:
+        return "warm"
+    return "normal"
+
+
+def _emergency_shutdown_apps() -> list:
+    """SIGKILL all tracked deployed apps. Returns list of killed app IDs."""
+    killed = []
+    for app_id, pid in list(running_apps.items()):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed.append(app_id)
+            print(f"🔴 THERMAL: Killed app '{app_id}' (pid {pid})")
+        except ProcessLookupError:
+            pass   # already dead
+        except Exception as e:
+            print(f"⚠️ THERMAL: Could not kill '{app_id}' (pid {pid}): {e}")
+        running_apps.pop(app_id, None)
+
+    # Termux notification
+    if killed:
+        msg = f"Apps stopped: {', '.join(killed)}"
+    else:
+        msg = "No apps were running."
+    run_command(
+        f'termux-notification '
+        f'--title "🔥 TinyCell Emergency Shutdown" '
+        f'--content "Phone overheating! {msg}" '
+        f'--priority max --vibrate 1000,500,1000',
+        timeout=3,
+    )
+    return killed
+
+
+async def _thermal_monitor_loop():
+    """Background task: check temp every 30 s and act on thresholds."""
+    global thermal_state
+    while True:
+        await asyncio.sleep(30)
+        temp = await asyncio.to_thread(get_temperature)
+        level = _thermal_level(temp)
+        thermal_state = {"temp": temp, "level": level, "last_check": time.time()}
+        print(f"🌡️  THERMAL: {temp}°C → {level}")
+
+        if level == "emergency":
+            print(f"🔴 THERMAL EMERGENCY: {temp}°C — killing all apps")
+            await asyncio.to_thread(_emergency_shutdown_apps)
+
+        elif level == "critical":
+            run_command(
+                f'termux-notification '
+                f'--title "🚨 TinyCell Critical Temp" '
+                f'--content "Temperature {temp}°C! Cool phone NOW or apps will stop." '
+                f'--priority max --vibrate 500,250,500',
+                timeout=3,
+            )
+
+        elif level == "hot":
+            run_command(
+                f'termux-notification '
+                f'--title "⚠️ TinyCell High Temp" '
+                f'--content "Temperature {temp}°C. Consider cooling phone." '
+                f'--priority high',
+                timeout=3,
+            )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
 def get_system_stats():
     """Get comprehensive device status"""
     battery_info = {}
     print("  STATS: Getting battery...")
+
+    # Method 1: Try sysfs first (fastest, works on most Android devices)
     try:
-        battery_output = run_command("termux-battery-status")
-        if battery_output and battery_output.strip().startswith("{"):
-             battery_info = json.loads(battery_output)
-    except:
-        pass
-    print("  STATS: Battery done")
+        capacity = run_command("cat /sys/class/power_supply/battery/capacity", timeout=0.5)
+        status_str = run_command("cat /sys/class/power_supply/battery/status", timeout=0.5)
+        if capacity and capacity.isdigit():
+            battery_info = {
+                "percentage": int(capacity),
+                "plugged": status_str.lower() not in ["discharging", "not charging"],
+                "status": status_str.lower() if status_str else "unknown"
+            }
+            print(f"  STATS: Battery from sysfs: {capacity}%")
+    except Exception as e:
+        print(f"  STATS: Sysfs failed: {e}")
 
-    # Fallback: Try reading directly from sysfs (works on many Androids even without root)
-    if not battery_info or battery_info.get("status") == "unavailable":
+    # Method 2: Try termux-battery-status only if sysfs failed
+    # (requires Termux:API app to be installed)
+    if not battery_info:
         try:
-            # Note: This might fail on some devices without root, but works on many
-            capacity = run_command("cat /sys/class/power_supply/battery/capacity", timeout=0.5)
-            status_str = run_command("cat /sys/class/power_supply/battery/status", timeout=0.5)
-            if capacity and capacity.isdigit():
-                battery_info = {
-                    "percentage": int(capacity),
-                    "plugged": status_str.lower() != "discharging",
-                    "status": status_str.lower() if status_str else "unknown"
-                }
-        except Exception as e:
-            print(f"  STATS: Sysfs read failed: {e}")
+            battery_output = run_command("termux-battery-status", timeout=0.3)
+            if battery_output and battery_output.strip().startswith("{"):
+                battery_info = json.loads(battery_output)
+                print("  STATS: Battery from termux-api")
+        except:
+            pass
 
-    # Final Fallback: psutil
+    # Method 3: Final Fallback - psutil
     if not battery_info:
         try:
             battery = psutil.sensors_battery()
@@ -85,16 +210,20 @@ def get_system_stats():
                     "plugged": battery.power_plugged,
                     "status": "charging" if battery.power_plugged else "discharging"
                 }
+                print("  STATS: Battery from psutil")
         except Exception:
             pass
 
-    # Ensure we always have a struct
+    # Ensure we always have a struct (last resort)
     if not battery_info:
          battery_info = {
             "percentage": 0,
             "plugged": False,
             "status": "unavailable"
         }
+         print("  STATS: Battery unavailable - using defaults")
+
+    print("  STATS: Battery done")
 
     # Memory info with fallback
     try:
@@ -117,6 +246,7 @@ def get_system_stats():
     else:
         display_name = device_model
 
+    temp = get_temperature()
     return {
         "status": "online",
         "device_name": display_name,
@@ -126,8 +256,26 @@ def get_system_stats():
         "android_version": run_command("getprop ro.build.version.release"),
         "battery": battery_info,
         "memory": memory_info,
-        "disk": disk_info
+        "disk": disk_info,
+        "temperature": temp,
+        "thermal_level": _thermal_level(temp),
     }
+
+class DeployRequest(BaseModel):
+    repo_url: str
+    app_name: str
+    app_type: str = "auto"
+    auto_restart: bool = True
+
+
+@app.on_event("startup")
+async def startup_event():
+    deployer.restore_on_startup()
+    asyncio.create_task(_thermal_monitor_loop())
+    asyncio.create_task(deployer.monitor_loop())
+    print("🌡️  Thermal monitor started")
+    print("🔄 App monitor started")
+
 
 @app.get("/")
 def read_root():
@@ -141,6 +289,84 @@ def get_status():
 def get_ip():
     """Return device IP for information purposes"""
     return {"ip": get_device_ip()}
+
+@app.get("/thermal")
+def get_thermal():
+    """Current temperature, threat level, and thresholds."""
+    temp = get_temperature()
+    level = _thermal_level(temp)
+    return {
+        "temperature": temp,
+        "level": level,              # normal | warm | hot | critical | emergency
+        "thresholds": {
+            "warm": 40,
+            "hot": TEMP_WARM,
+            "critical": TEMP_HOT,
+            "emergency": TEMP_CRITICAL,
+        },
+        "running_apps": list(running_apps.keys()),
+    }
+
+
+@app.post("/thermal/emergency-shutdown")
+def manual_emergency_shutdown():
+    """Manually trigger emergency shutdown of all running apps."""
+    killed = _emergency_shutdown_apps()
+    return {"killed": killed, "message": f"Stopped {len(killed)} app(s)"}
+
+
+@app.post("/deploy")
+async def deploy_app(req: DeployRequest):
+    deploy_id = await deployer.deploy(req.repo_url, req.app_name, req.app_type, req.auto_restart)
+    return {"deploy_id": deploy_id}
+
+
+@app.get("/deploy/{deploy_id}/progress")
+def get_deploy_progress(deploy_id: str):
+    progress = deployer.get_deploy_progress(deploy_id)
+    if not progress:
+        return JSONResponse(status_code=404, content={"error": "Deploy ID not found"})
+    return progress
+
+
+@app.get("/apps")
+def list_apps():
+    return deployer.get_all_apps()
+
+
+@app.get("/apps/{app_id}")
+def get_app(app_id: str):
+    app = deployer.get_app(app_id)
+    if not app:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    return app
+
+
+@app.post("/apps/{app_id}/start")
+async def start_app(app_id: str):
+    ok = await deployer.start_app(app_id)
+    return {"success": ok}
+
+
+@app.post("/apps/{app_id}/stop")
+def stop_app(app_id: str):
+    return {"success": deployer.stop_app(app_id)}
+
+
+@app.delete("/apps/{app_id}")
+def delete_app(app_id: str):
+    return {"success": deployer.delete_app(app_id)}
+
+
+@app.get("/apps/{app_id}/metrics")
+def get_app_metrics(app_id: str):
+    return deployer.get_app_metrics(app_id)
+
+
+@app.get("/apps/{app_id}/logs")
+def get_app_logs(app_id: str, lines: int = 100):
+    return {"logs": deployer.get_app_logs(app_id, lines)}
+
 
 @app.get("/scan")
 def scan_hardware():
