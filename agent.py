@@ -66,28 +66,32 @@ thermal_state: dict = {"temp": 0.0, "level": "normal", "last_check": 0}
 
 
 def get_temperature() -> float:
-    """Return device temperature in Celsius. Tries battery API then sysfs."""
-    # Method 1: termux-battery-status (most accurate, returns battery temp)
+    """Return device temperature in Celsius."""
+    # Method 1: termux-battery-status (most accurate)
     try:
-        output = run_command("termux-battery-status", timeout=2)
-        if output and output.strip().startswith("{"):
-            data = json.loads(output)
-            temp = data.get("temperature")
+        out = run_command("termux-battery-status", timeout=4)
+        if out and out.strip().startswith("{"):
+            temp = json.loads(out).get("temperature")
             if temp and float(temp) > 0:
                 return float(temp)
     except Exception:
         pass
 
-    # Method 2: sysfs thermal zones (CPU temp, millidegrees → Celsius)
+    # Method 2: sysfs thermal zones
     try:
-        zones_raw = run_command("ls /sys/class/thermal/", timeout=0.5)
-        for zone in zones_raw.split():
-            if zone.startswith("thermal_zone"):
-                raw = run_command(f"cat /sys/class/thermal/{zone}/temp", timeout=0.5)
-                if raw and raw.lstrip("-").isdigit():
-                    temp = int(raw) / 1000.0
-                    if 20.0 <= temp <= 85.0:   # sanity range
-                        return temp
+        import os
+        def _sysfs(p):
+            try:
+                with open(p) as f: return f.read().strip()
+            except: return None
+        for zone in sorted(os.listdir("/sys/class/thermal/")):
+            if not zone.startswith("thermal_zone"):
+                continue
+            raw = _sysfs(f"/sys/class/thermal/{zone}/temp")
+            if raw and raw.lstrip("-").isdigit():
+                temp = int(raw) / 1000.0
+                if 20.0 <= temp <= 85.0:
+                    return temp
     except Exception:
         pass
 
@@ -173,57 +177,55 @@ async def _thermal_monitor_loop():
 def get_system_stats():
     """Get comprehensive device status"""
     battery_info = {}
-    print("  STATS: Getting battery...")
 
-    # Method 1: Try sysfs first (fastest, works on most Android devices)
+    # Method 1: termux-battery-status (richest data, needs Termux:API app running)
     try:
-        capacity = run_command("cat /sys/class/power_supply/battery/capacity", timeout=0.5)
-        status_str = run_command("cat /sys/class/power_supply/battery/status", timeout=0.5)
-        if capacity and capacity.isdigit():
+        out = run_command("termux-battery-status", timeout=4)
+        if out and out.strip().startswith("{"):
+            data = json.loads(out)
             battery_info = {
-                "percentage": int(capacity),
-                "plugged": status_str.lower() not in ["discharging", "not charging"],
-                "status": status_str.lower() if status_str else "unknown"
+                "percentage": data.get("percentage", 0),
+                "plugged": data.get("plugged", "UNPLUGGED") != "UNPLUGGED",
+                "status": data.get("status", "unknown").lower(),
+                "health": data.get("health", ""),
+                "temperature": data.get("temperature", 0),
             }
-            print(f"  STATS: Battery from sysfs: {capacity}%")
-    except Exception as e:
-        print(f"  STATS: Sysfs failed: {e}")
+    except Exception:
+        pass
 
-    # Method 2: Try termux-battery-status only if sysfs failed
-    # (requires Termux:API app to be installed)
+    # Method 2: sysfs (no Termux:API needed)
     if not battery_info:
-        try:
-            battery_output = run_command("termux-battery-status", timeout=0.3)
-            if battery_output and battery_output.strip().startswith("{"):
-                battery_info = json.loads(battery_output)
-                print("  STATS: Battery from termux-api")
-        except:
-            pass
-
-    # Method 3: Final Fallback - psutil
-    if not battery_info:
-        try:
-            battery = psutil.sensors_battery()
-            if battery:
+        def _sysfs(path):
+            try:
+                with open(path) as f: return f.read().strip()
+            except: return None
+        for root in ["/sys/class/power_supply/battery", "/sys/class/power_supply/Battery",
+                     "/sys/class/power_supply/BAT0", "/sys/class/power_supply/bms"]:
+            cap = _sysfs(f"{root}/capacity")
+            if cap and cap.isdigit():
+                st = _sysfs(f"{root}/status") or "unknown"
                 battery_info = {
-                    "percentage": battery.percent,
-                    "plugged": battery.power_plugged,
-                    "status": "charging" if battery.power_plugged else "discharging"
+                    "percentage": int(cap),
+                    "plugged": st.lower() not in ("discharging", "not charging"),
+                    "status": st.lower(),
                 }
-                print("  STATS: Battery from psutil")
+                break
+
+    # Method 3: psutil
+    if not battery_info:
+        try:
+            b = psutil.sensors_battery()
+            if b:
+                battery_info = {
+                    "percentage": b.percent,
+                    "plugged": b.power_plugged,
+                    "status": "charging" if b.power_plugged else "discharging",
+                }
         except Exception:
             pass
 
-    # Ensure we always have a struct (last resort)
     if not battery_info:
-         battery_info = {
-            "percentage": 0,
-            "plugged": False,
-            "status": "unavailable"
-        }
-         print("  STATS: Battery unavailable - using defaults")
-
-    print("  STATS: Battery done")
+        battery_info = {"percentage": 0, "plugged": False, "status": "unavailable"}
 
     # Memory info with fallback
     try:
