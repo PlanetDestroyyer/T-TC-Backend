@@ -16,6 +16,7 @@ import port_manager
 
 APPS_DIR = os.path.expanduser("~/apps")
 _REGISTRY = os.path.join(APPS_DIR, ".registry.json")
+_ACTIVITY_LOG = os.path.join(APPS_DIR, ".activity.log")
 _URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 
 _pids: dict = {}         # {app_id: {app_pid, tunnel_pid}}
@@ -36,6 +37,38 @@ def _save(reg: dict):
     os.makedirs(APPS_DIR, exist_ok=True)
     with open(_REGISTRY, "w") as f:
         json.dump(reg, f, indent=2)
+
+
+# ─── Activity Log ─────────────────────────────────────────────────────────────
+
+def _log_activity(action: str, app_id: str, detail: str = ""):
+    """Append a timestamped activity entry to the global activity log."""
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "action": action,
+        "app": app_id,
+        "detail": detail,
+    }
+    os.makedirs(APPS_DIR, exist_ok=True)
+    with open(_ACTIVITY_LOG, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    print(f"📋 [{action}] {app_id}" + (f" — {detail}" if detail else ""))
+
+
+def get_activity_log(lines: int = 100) -> list[dict]:
+    """Return the last N activity entries, newest first."""
+    if not os.path.exists(_ACTIVITY_LOG):
+        return []
+    with open(_ACTIVITY_LOG) as f:
+        all_lines = f.readlines()
+    entries = []
+    for line in reversed(all_lines[-lines:]):
+        try:
+            entries.append(json.loads(line.strip()))
+        except Exception:
+            pass
+    return entries
+
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
@@ -110,6 +143,7 @@ def stop_app(app_id: str) -> bool:
     if app_id in reg["apps"]:
         reg["apps"][app_id]["status"] = "stopped"
         _save(reg)
+    _log_activity("stop", app_id)
     return True
 
 
@@ -126,10 +160,11 @@ async def start_app(app_id: str) -> bool:
     reg["apps"][app_id]["status"] = "running"
     reg["apps"][app_id]["pid"] = proc.pid
     _save(reg)
-    # Only start a new tunnel+proxy if none is alive
+    _log_activity("start", app_id)
+    # Only start a new tunnel if none is alive
     existing_tunnel = _pids.get(app_id, {}).get("tunnel_pid")
     if not existing_tunnel or not _is_alive(existing_tunnel):
-        asyncio.create_task(_setup_proxy_and_tunnel(app_id, app["port"], app.get("secret_path", "")))
+        asyncio.create_task(_setup_tunnel(app_id, app["port"]))
     return True
 
 
@@ -145,6 +180,7 @@ def delete_app(app_id: str) -> bool:
     _save(reg)
     if app:
         shutil.rmtree(app["app_dir"], ignore_errors=True)
+        _log_activity("delete", app_id, f"repo + venv wiped from {app['app_dir']}")
     port_manager.release(app_id)
     # Release proxy port
     data_ports = port_manager._load()
@@ -221,24 +257,24 @@ async def _run_update(deploy_id: str, app_id: str):
         step("App started", done=True)
 
         step("Creating public URL...")
-        secret = app.get("secret_path") or secrets.token_hex(4)
-        tunnel_url = await _setup_proxy_and_tunnel(app_id, port, secret) or ""
+        tunnel_url = await _setup_tunnel(app_id, port) or ""
         step(f"URL: {tunnel_url or 'unavailable'}", done=True)
 
         reg = _load()
         if app_id in reg["apps"]:
             reg["apps"][app_id]["status"] = "running"
             reg["apps"][app_id]["pid"] = proc.pid
-            reg["apps"][app_id]["secret_path"] = secret
             reg["apps"][app_id]["tunnel_url"] = tunnel_url
             _save(reg)
 
         _deployments[deploy_id]["status"] = "done"
+        _log_activity("update", app_id, f"url={tunnel_url}")
 
     except Exception as e:
         step(f"Error: {e}", err=True)
         _deployments[deploy_id]["status"] = "error"
         _deployments[deploy_id]["error"] = str(e)
+        _log_activity("update_error", app_id, str(e))
 
 
 
@@ -250,6 +286,7 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         print(f"  DEPLOY [{deploy_id}]: {msg}")
 
     try:
+        _log_activity("deploy_start", app_name, repo_url)
         if os.path.exists(app_dir):
             raise RuntimeError(f"App '{app_name}' already exists. Delete it first.")
 
@@ -276,8 +313,7 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         step("Server started", done=True)
 
         step("Creating public URL...")
-        secret = secrets.token_hex(4)
-        tunnel_url = await _setup_proxy_and_tunnel(app_name, port, secret) or ""
+        tunnel_url = await _setup_tunnel(app_name, port) or ""
         step(f"URL: {tunnel_url or 'unavailable'}", done=True)
 
         _pids[app_name] = {"app_pid": proc.pid}
@@ -293,7 +329,6 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
             "status": "running",
             "pid": proc.pid,
             "tunnel_url": tunnel_url,
-            "secret_path": secret,
             "app_dir": app_dir,
             "auto_restart": auto_restart,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -303,6 +338,7 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
 
         _deployments[deploy_id]["status"] = "done"
         _deployments[deploy_id]["app_id"] = app_name
+        _log_activity("deploy", app_name, f"type={app_type} url={tunnel_url}")
 
     except Exception as e:
         step(f"Error: {e}", err=True)
@@ -310,6 +346,7 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         _deployments[deploy_id]["error"] = str(e)
         port_manager.release(app_name)
         shutil.rmtree(app_dir, ignore_errors=True)
+        _log_activity("deploy_error", app_name, str(e))
 
 
 # ─── Background tasks ────────────────────────────────────────────────────────
@@ -335,9 +372,7 @@ async def monitor_loop():
                     tunnel_pid = _pids.get(app_id, {}).get("tunnel_pid")
                     if not tunnel_pid or not _is_alive(tunnel_pid):
                         print(f"🌐 Tunnel also dead for '{app_id}', restarting tunnel...")
-                        asyncio.create_task(_setup_proxy_and_tunnel(
-                            app_id, app["port"], app.get("secret_path", "")
-                        ))
+                        asyncio.create_task(_setup_tunnel(app_id, app["port"]))
                     changed = True
         if changed:
             _save(reg)
@@ -420,16 +455,6 @@ def _launch_app(app: dict) -> subprocess.Popen | None:
         return subprocess.Popen(cmd, cwd=d, stdout=lf, stderr=lf, env=env)
 
 
-def _start_proxy_process(app_id: str, proxy_port: int, app_port: int, secret: str) -> subprocess.Popen:
-    log = os.path.join(APPS_DIR, app_id, "proxy.log")
-    proxy_script = os.path.join(os.path.dirname(__file__), "tc_proxy.py")
-    with open(log, "w") as f:
-        return subprocess.Popen(
-            [sys.executable, proxy_script, str(proxy_port), str(app_port), secret],
-            stdout=f, stderr=subprocess.STDOUT,
-        )
-
-
 def _start_tunnel_process(app_id: str, port: int) -> subprocess.Popen:
     log = os.path.join(APPS_DIR, app_id, "tunnel.log")
     with open(log, "w") as f:
@@ -452,46 +477,19 @@ async def _wait_for_tunnel_url(app_id: str, timeout: int = 30) -> str:
     return ""
 
 
-async def _setup_proxy_and_tunnel(app_id: str, app_port: int, secret: str):
-    """Launch tc_proxy → cloudflared → save full secret URL to registry."""
+async def _setup_tunnel(app_id: str, port: int) -> str:
+    """Start cloudflared directly → app port, save URL, return it."""
     await asyncio.sleep(3)
-
-    # Allocate (or reuse) a proxy port
-    try:
-        proxy_port = port_manager.allocate_proxy(app_id)
-    except RuntimeError:
-        # Already allocated — look it up
-        proxy_port = port_manager._load()["allocated"].get(f"__proxy_{app_id}")
-        if not proxy_port:
-            print(f"❌ Could not get proxy port for '{app_id}'")
-            return
-
-    # Kill any old proxy for this app
-    old_proxy = _pids.get(app_id, {}).get("proxy_pid")
-    if old_proxy:
-        _kill(old_proxy)
-
-    proxy_proc = _start_proxy_process(app_id, proxy_port, app_port, secret)
-    _pids.setdefault(app_id, {})["proxy_pid"] = proxy_proc.pid
-
-    # Give proxy a moment to bind
-    await asyncio.sleep(1)
-
-    tunnel_proc = _start_tunnel_process(app_id, proxy_port)
-    _pids[app_id]["tunnel_pid"] = tunnel_proc.pid
-
-    base_url = await _wait_for_tunnel_url(app_id)
-    if base_url and secret:
-        full_url = f"{base_url}/tc-{secret}"
-    else:
-        full_url = base_url
-
+    tunnel_proc = _start_tunnel_process(app_id, port)
+    _pids.setdefault(app_id, {})["tunnel_pid"] = tunnel_proc.pid
+    url = await _wait_for_tunnel_url(app_id)
     reg = _load()
     if app_id in reg["apps"]:
-        reg["apps"][app_id]["tunnel_url"] = full_url
+        reg["apps"][app_id]["tunnel_url"] = url
         _save(reg)
-    print(f"🌐 Tunnel+Proxy ready for '{app_id}': {full_url}")
-    return full_url
+    print(f"🌐 Tunnel ready for '{app_id}': {url}")
+    return url
+
 
 
 

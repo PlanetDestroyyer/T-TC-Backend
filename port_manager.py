@@ -4,19 +4,6 @@ import os
 _FILE = os.path.expanduser("~/apps/.ports.json")
 _BACKEND  = range(3000, 3025)
 _FRONTEND = range(3025, 3050)
-_PROXY    = range(4000, 4050)
-
-
-def allocate_proxy(app_id: str) -> int:
-    data = _load()
-    used = set(data["allocated"].values())
-    proxy_key = f"__proxy_{app_id}"
-    for port in _PROXY:
-        if port not in used:
-            data["allocated"][proxy_key] = port
-            _save(data)
-            return port
-    raise RuntimeError(f"No available proxy ports for '{app_id}'")
 
 
 def _load() -> dict:

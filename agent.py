@@ -382,6 +382,12 @@ def get_app_logs(app_id: str, lines: int = 100):
     return {"logs": deployer.get_app_logs(app_id, lines)}
 
 
+@app.get("/activity")
+def get_activity(lines: int = 100):
+    """Return the last N backend activity events (deploy, stop, start, delete, update, errors)."""
+    return {"events": deployer.get_activity_log(lines)}
+
+
 @app.get("/scan")
 def scan_hardware():
     cpu_info = run_command("cat /proc/cpuinfo")
