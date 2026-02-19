@@ -3,7 +3,7 @@
 echo "Installing TinyCell Dependencies..."
 termux-setup-storage
 pkg update -y && pkg upgrade -y
-pkg install python git termux-api openssl-tool -y
+pkg install python git nodejs cloudflared termux-api openssl-tool -y
 
 echo "Setting up Virtual Environment..."
 python -m venv venv
