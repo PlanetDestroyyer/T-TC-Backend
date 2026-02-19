@@ -1,7 +1,14 @@
 #!/bin/bash
 
-echo "⬇️  Updating backend..."
+echo "⬇️  Pulling latest changes..."
 git pull
+
+echo "🛑 Stopping existing backend..."
+pkill -f "agent.py"    2>/dev/null
+pkill -f "uvicorn"     2>/dev/null
+pkill -f "cloudflared" 2>/dev/null
+sleep 2
+echo "✅ Old processes cleared"
 
 echo "🔍 Checking packages..."
 MISSING=""
@@ -16,7 +23,14 @@ if [ -n "$MISSING" ]; then
     pkg install -y $MISSING
 fi
 
-[ ! -d venv ] && python -m venv venv && source venv/bin/activate && pip install --no-cache-dir -r requirements.txt || source venv/bin/activate
+if [ ! -d venv ]; then
+    echo "🐍 Setting up virtual environment..."
+    python -m venv venv
+    source venv/bin/activate
+    pip install --no-cache-dir -r requirements.txt
+else
+    source venv/bin/activate
+fi
 
 echo "🚀 Starting backend..."
 ./start.sh
