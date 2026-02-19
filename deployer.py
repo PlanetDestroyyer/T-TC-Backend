@@ -184,7 +184,8 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         proc = _launch_app({"type": app_type, "app_dir": app_dir, "port": port})
         if not proc:
             raise RuntimeError(f"Unknown app type: {app_type}")
-        await asyncio.sleep(3)
+        # Give serve/uvicorn/flask time to fully bind the port before tunnelling
+        await asyncio.sleep(8)
         step("Server started", done=True)
 
         step("Creating public URL...")
@@ -314,7 +315,7 @@ def _launch_app(app: dict) -> subprocess.Popen | None:
         cmd = ["python", "-m", "flask", "run", "--host", "0.0.0.0", "--port", str(p)]
     elif t == "react":
         build = "build" if os.path.exists(os.path.join(d, "build")) else "dist"
-        cmd = ["npx", "serve", "-s", build, "-l", str(p)]
+        cmd = ["serve", "-s", build, "-l", str(p)]
     else:
         return None
     log = os.path.join(d, "app.log")
@@ -376,5 +377,6 @@ async def _install_deps(app_dir: str, app_type: str):
         if os.path.exists(req):
             await _run_async(["pip", "install", "-r", "requirements.txt"], cwd=app_dir, timeout=300)
     elif app_type == "react":
+        await _run_async(["npm", "install", "-g", "serve"], timeout=60)
         await _run_async(["npm", "install"], cwd=app_dir, timeout=300)
         await _run_async(["npm", "run", "build"], cwd=app_dir, timeout=300)
