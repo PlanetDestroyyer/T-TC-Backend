@@ -154,6 +154,81 @@ async def deploy(repo_url: str, app_name: str, app_type: str, auto_restart: bool
     return deploy_id
 
 
+async def update_app(app_id: str) -> str:
+    """Pull latest code, reinstall deps, restart. Returns a deploy_id for progress polling."""
+    deploy_id = uuid.uuid4().hex[:8]
+    _deployments[deploy_id] = {
+        "status": "deploying",
+        "app_name": app_id,
+        "steps": [],
+        "error": None,
+        "app_id": app_id,
+    }
+    asyncio.create_task(_run_update(deploy_id, app_id))
+    return deploy_id
+
+
+async def _run_update(deploy_id: str, app_id: str):
+    def step(msg: str, done: bool = False, err: bool = False):
+        _deployments[deploy_id]["steps"].append({"msg": msg, "done": done, "error": err})
+        print(f"  UPDATE [{deploy_id}]: {msg}")
+
+    reg = _load()
+    app = reg["apps"].get(app_id)
+    if not app:
+        _deployments[deploy_id]["status"] = "error"
+        _deployments[deploy_id]["error"] = "App not found"
+        return
+
+    app_dir = app["app_dir"]
+    app_type = app["type"]
+    port = app["port"]
+
+    try:
+        step("Stopping app...")
+        stop_app(app_id)
+        step("App stopped", done=True)
+
+        step("Pulling latest code...")
+        await _run_async(["git", "pull"], cwd=app_dir, timeout=60)
+        step("Code updated", done=True)
+
+        step("Reinstalling dependencies...")
+        await _install_deps(app_dir, app_type)
+        step("Dependencies ready", done=True)
+
+        step("Starting app...")
+        proc = _launch_app(app)
+        if not proc:
+            raise RuntimeError("Failed to launch app")
+        _pids[app_id] = {"app_pid": proc.pid}
+        running_apps[app_id] = proc.pid
+        await asyncio.sleep(8)
+        step("App started", done=True)
+
+        step("Creating public URL...")
+        tunnel_proc = _start_tunnel_process(app_id, port)
+        tunnel_url = await _wait_for_tunnel_url(app_id)
+        step(f"URL: {tunnel_url or 'unavailable'}", done=True)
+
+        _pids[app_id]["tunnel_pid"] = tunnel_proc.pid
+
+        reg = _load()
+        if app_id in reg["apps"]:
+            reg["apps"][app_id]["status"] = "running"
+            reg["apps"][app_id]["pid"] = proc.pid
+            reg["apps"][app_id]["tunnel_url"] = tunnel_url
+            _save(reg)
+
+        _deployments[deploy_id]["status"] = "done"
+
+    except Exception as e:
+        step(f"Error: {e}", err=True)
+        _deployments[deploy_id]["status"] = "error"
+        _deployments[deploy_id]["error"] = str(e)
+
+
+
 async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: str, auto_restart: bool):
     app_dir = os.path.join(APPS_DIR, app_name)
 

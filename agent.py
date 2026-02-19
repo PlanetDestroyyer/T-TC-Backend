@@ -359,6 +359,14 @@ def stop_app(app_id: str):
     return {"success": deployer.stop_app(app_id)}
 
 
+@app.post("/apps/{app_id}/update")
+async def update_app(app_id: str):
+    """Pull latest code, reinstall deps, restart app. Poll /deploy/{id}/progress for steps."""
+    deploy_id = await deployer.update_app(app_id)
+    return {"deploy_id": deploy_id}
+
+
+
 @app.delete("/apps/{app_id}")
 def delete_app(app_id: str):
     return {"success": deployer.delete_app(app_id)}
