@@ -26,11 +26,11 @@ fi
 if [ ! -d venv ]; then
     echo "🐍 Setting up virtual environment..."
     python -m venv venv
-    source venv/bin/activate
-    pip install --no-cache-dir -r requirements.txt
-else
-    source venv/bin/activate
 fi
+
+source venv/bin/activate
+echo "📦 Installing/updating Python packages..."
+pip install --no-cache-dir -q -r requirements.txt
 
 echo "🚀 Starting backend..."
 ./start.sh
