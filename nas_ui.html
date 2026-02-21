@@ -1,369 +1,1069 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TinyCell NAS</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #080F1A; color: #F0F6FF; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
-  a { color: inherit; text-decoration: none; }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TinyCell NAS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
-  /* Layout */
-  .topbar { background: #0F1D2E; border-bottom: 1px solid #243349; padding: 14px 20px; display: flex; align-items: center; gap: 14px; }
-  .logo { font-size: 18px; font-weight: 800; letter-spacing: 0.3px; }
-  .logo span { color: #4D9FFF; }
-  .breadcrumb { flex: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; font-size: 13px; color: #8BA3BF; overflow: hidden; }
-  .breadcrumb .seg { cursor: pointer; padding: 3px 6px; border-radius: 6px; white-space: nowrap; }
-  .breadcrumb .seg:hover { background: #162032; color: #F0F6FF; }
-  .breadcrumb .sep { color: #4E6580; }
-  .breadcrumb .seg.active { color: #F0F6FF; font-weight: 700; }
+    :root {
+      --bg: #060D18;
+      --surface: #0B1525;
+      --card: #0F1D2F;
+      --card2: #162033;
+      --border: #1E3048;
+      --border2: #2A4060;
+      --text: #EEF4FF;
+      --muted: #7B9AB8;
+      --dim: #3A5270;
+      --blue: #3B8FF5;
+      --blue2: #5BACFF;
+      --green: #22C55E;
+      --red: #F43F5E;
+      --yellow: #F59E0B;
+      --purple: #8B5CF6;
+      --glow: rgba(59, 143, 245, .15);
+    }
 
-  .main { padding: 20px; max-width: 900px; margin: 0 auto; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', -apple-system, sans-serif;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
 
-  /* Roots */
-  .roots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
-  .root-card { background: #162032; border: 1px solid #243349; border-radius: 14px; padding: 20px; cursor: pointer; transition: border-color .15s, transform .1s; }
-  .root-card:hover { border-color: #4D9FFF; transform: translateY(-1px); }
-  .root-card.unavailable { opacity: .45; cursor: default; pointer-events: none; }
-  .root-card .icon { font-size: 30px; margin-bottom: 10px; }
-  .root-card .label { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
-  .root-card .desc { color: #8BA3BF; font-size: 12px; }
-  .root-card .badge { margin-top: 8px; font-size: 11px; color: #F59E0B; background: #2D1A00; border: 1px solid #F59E0B; border-radius: 6px; padding: 3px 8px; display: inline-block; }
+    /* ── Topbar ─────────────────────────────────────────────────────────────── */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(6, 13, 24, .85);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
 
-  /* Toolbar */
-  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
-  .upload-btn { background: #4D9FFF; color: #fff; border: none; padding: 9px 18px; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; gap: 6px; }
-  .upload-btn:hover { background: #3a8eee; }
-  .upload-btn:disabled { background: #1C2A3D; color: #4E6580; cursor: default; }
-  #file-input { display: none; }
+    .logo {
+      font-size: 17px;
+      font-weight: 800;
+      letter-spacing: -.3px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
 
-  /* Progress */
-  .progress-wrap { flex: 1; min-width: 180px; }
-  .progress-bar-bg { background: #1C2A3D; border-radius: 6px; height: 8px; overflow: hidden; }
-  .progress-bar { background: #4D9FFF; height: 100%; border-radius: 6px; width: 0; transition: width .2s; }
-  .progress-label { font-size: 11px; color: #8BA3BF; margin-top: 4px; }
+    .logo-icon {
+      width: 30px;
+      height: 30px;
+      background: linear-gradient(135deg, #3B8FF5, #8B5CF6);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+    }
 
-  /* File list */
-  .file-list { border: 1px solid #243349; border-radius: 14px; overflow: hidden; }
-  .file-row { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid #1C2A3D; transition: background .1s; }
-  .file-row:last-child { border-bottom: none; }
-  .file-row:hover { background: #162032; }
-  .file-row .ficon { font-size: 20px; width: 26px; text-align: center; flex-shrink: 0; }
-  .file-row .info { flex: 1; min-width: 0; }
-  .file-row .fname { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
-  .file-row .fname:hover { color: #4D9FFF; }
-  .file-row .fmeta { font-size: 11px; color: #4E6580; margin-top: 2px; }
-  .file-row .actions { display: flex; gap: 8px; flex-shrink: 0; }
-  .dl-btn { background: #1C2A3D; border: 1px solid #2E4160; color: #4D9FFF; padding: 5px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; }
-  .dl-btn:hover { background: #243349; }
-  .del-btn { background: transparent; border: none; color: #4E6580; font-size: 18px; cursor: pointer; padding: 2px 4px; }
-  .del-btn:hover { color: #F43F5E; }
-  .chevron { color: #4E6580; font-size: 20px; font-weight: 300; }
+    .logo-accent {
+      color: var(--blue2);
+    }
 
-  /* Empty / loading */
-  .center { text-align: center; padding: 60px 20px; color: #4E6580; }
-  .center .big { font-size: 48px; margin-bottom: 12px; }
-  .center p { font-size: 14px; }
-  .spinner { display: inline-block; width: 28px; height: 28px; border: 3px solid #243349; border-top-color: #4D9FFF; border-radius: 50%; animation: spin .7s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+    .breadcrumb {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      flex-wrap: nowrap;
+      gap: 2px;
+      overflow: hidden;
+      font-size: 13px;
+      color: var(--muted);
+    }
 
-  /* Toast */
-  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(60px); background: #162032; border: 1px solid #243349; color: #F0F6FF; padding: 10px 20px; border-radius: 10px; font-size: 13px; font-weight: 600; opacity: 0; transition: all .3s; z-index: 999; white-space: nowrap; }
-  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-  #toast.err { border-color: #F43F5E; color: #F43F5E; }
+    .bc-seg {
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 6px;
+      white-space: nowrap;
+      transition: background .15s, color .15s;
+    }
 
-  /* Delete confirm modal */
-  .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100; align-items: center; justify-content: center; }
-  .overlay.show { display: flex; }
-  .modal { background: #0F1D2E; border: 1px solid #243349; border-radius: 16px; padding: 24px; width: 320px; max-width: 90vw; }
-  .modal h3 { margin-bottom: 8px; font-size: 16px; }
-  .modal p { color: #8BA3BF; font-size: 13px; margin-bottom: 20px; word-break: break-all; }
-  .modal-btns { display: flex; gap: 10px; }
-  .modal-btns button { flex: 1; padding: 10px; border-radius: 10px; font-weight: 700; font-size: 14px; cursor: pointer; border: none; }
-  .btn-cancel { background: #1C2A3D; color: #F0F6FF; }
-  .btn-del { background: #F43F5E; color: #fff; }
+    .bc-seg:hover {
+      background: var(--card2);
+      color: var(--text);
+    }
 
-  /* Page title */
-  .page-title { font-size: 26px; font-weight: 800; margin-bottom: 6px; }
-  .page-sub { color: #8BA3BF; font-size: 13px; margin-bottom: 24px; }
+    .bc-seg.active {
+      color: var(--text);
+      font-weight: 600;
+      cursor: default;
+    }
 
-  /* Tip */
-  .tip { background: #162032; border: 1px solid #243349; border-radius: 12px; padding: 14px 16px; font-size: 13px; color: #8BA3BF; margin-top: 20px; line-height: 1.6; }
-  .tip code { color: #86EFAC; font-family: monospace; }
-</style>
+    .bc-sep {
+      color: var(--dim);
+      padding: 0 2px;
+    }
+
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    /* ── Main layout ────────────────────────────────────────────────────────── */
+    .main {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 32px 20px 80px;
+    }
+
+    /* ── Hero / roots page ─────────────────────────────────────────────────── */
+    .hero {
+      text-align: center;
+      padding: 48px 0 40px;
+    }
+
+    .hero-icon {
+      font-size: 52px;
+      margin-bottom: 16px;
+      display: block;
+    }
+
+    .hero h1 {
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: -.5px;
+      margin-bottom: 8px;
+    }
+
+    .hero h1 span {
+      background: linear-gradient(90deg, #3B8FF5, #8B5CF6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero p {
+      color: var(--muted);
+      font-size: 15px;
+      max-width: 420px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+
+    .roots-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      gap: 14px;
+      margin-top: 36px;
+    }
+
+    .root-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 22px 18px;
+      cursor: pointer;
+      transition: border-color .2s, transform .15s, box-shadow .2s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .root-card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, var(--glow), transparent);
+      opacity: 0;
+      transition: opacity .2s;
+    }
+
+    .root-card:hover {
+      border-color: var(--blue);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 32px rgba(59, 143, 245, .2);
+    }
+
+    .root-card:hover::before {
+      opacity: 1;
+    }
+
+    .root-card.unavail {
+      opacity: .4;
+      cursor: default;
+      pointer-events: none;
+    }
+
+    .root-icon {
+      font-size: 32px;
+      margin-bottom: 12px;
+      display: block;
+    }
+
+    .root-label {
+      font-weight: 700;
+      font-size: 15px;
+      margin-bottom: 4px;
+    }
+
+    .root-desc {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .root-badge {
+      display: inline-block;
+      margin-top: 10px;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--yellow);
+      background: rgba(245, 158, 11, .1);
+      border: 1px solid rgba(245, 158, 11, .3);
+      border-radius: 6px;
+      padding: 3px 8px;
+      font-family: monospace;
+    }
+
+    .root-arrow {
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--dim);
+      font-size: 20px;
+      font-weight: 300;
+    }
+
+    .tip-box {
+      margin-top: 24px;
+      background: rgba(59, 143, 245, .06);
+      border: 1px solid rgba(59, 143, 245, .2);
+      border-radius: 12px;
+      padding: 14px 18px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .tip-box code {
+      color: #86EFAC;
+      font-family: monospace;
+    }
+
+    /* ── Toolbar ────────────────────────────────────────────────────────────── */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 18px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      border: none;
+      transition: opacity .15s, transform .1s;
+    }
+
+    .btn:active {
+      transform: scale(.97);
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: default;
+    }
+
+    .btn-blue {
+      background: var(--blue);
+      color: #fff;
+    }
+
+    .btn-blue:hover:not(:disabled) {
+      background: var(--blue2);
+    }
+
+    .btn-outline {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border2);
+    }
+
+    .btn-outline:hover {
+      background: var(--card2);
+    }
+
+    .btn-danger {
+      background: rgba(244, 63, 94, .12);
+      color: var(--red);
+      border: 1px solid rgba(244, 63, 94, .25);
+    }
+
+    .btn-danger:hover {
+      background: rgba(244, 63, 94, .2);
+    }
+
+    /* ── Drop zone ──────────────────────────────────────────────────────────── */
+    .drop-zone {
+      border: 2px dashed var(--border2);
+      border-radius: 14px;
+      padding: 28px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+      transition: border-color .2s, background .2s;
+      cursor: pointer;
+      margin-bottom: 16px;
+    }
+
+    .drop-zone.drag-over {
+      border-color: var(--blue);
+      background: rgba(59, 143, 245, .06);
+      color: var(--text);
+    }
+
+    .drop-zone .dz-icon {
+      font-size: 32px;
+      margin-bottom: 8px;
+    }
+
+    .drop-zone small {
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      color: var(--dim);
+    }
+
+    /* ── Upload queue ───────────────────────────────────────────────────────── */
+    .upload-queue {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .upload-item {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .upload-item .ui-icon {
+      font-size: 20px;
+      flex-shrink: 0;
+    }
+
+    .upload-item .ui-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .upload-item .ui-name {
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .upload-item .ui-bar-bg {
+      background: var(--card2);
+      height: 4px;
+      border-radius: 4px;
+      margin-top: 6px;
+      overflow: hidden;
+    }
+
+    .upload-item .ui-bar {
+      background: var(--blue);
+      height: 100%;
+      border-radius: 4px;
+      width: 0;
+      transition: width .2s;
+    }
+
+    .upload-item .ui-pct {
+      font-size: 11px;
+      color: var(--muted);
+      flex-shrink: 0;
+      min-width: 36px;
+      text-align: right;
+    }
+
+    .upload-item.done .ui-bar {
+      background: var(--green);
+      width: 100% !important;
+    }
+
+    .upload-item.err .ui-bar {
+      background: var(--red);
+    }
+
+    /* ── File list ──────────────────────────────────────────────────────────── */
+    .file-list {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+    }
+
+    .file-list-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--dim);
+      letter-spacing: .8px;
+      text-transform: uppercase;
+    }
+
+    .file-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      transition: background .12s;
+      cursor: pointer;
+    }
+
+    .file-row:last-child {
+      border-bottom: none;
+    }
+
+    .file-row:hover {
+      background: var(--card2);
+    }
+
+    .file-row .ficon {
+      font-size: 22px;
+      width: 28px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .file-row .finfo {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .file-row .fname {
+      font-size: 14px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .file-row .fmeta {
+      font-size: 11px;
+      color: var(--dim);
+      margin-top: 2px;
+    }
+
+    .file-row .factions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .icon-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      border: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background .15s;
+      background: transparent;
+    }
+
+    .icon-btn:hover {
+      background: var(--card2);
+    }
+
+    .icon-btn.del {
+      color: var(--dim);
+    }
+
+    .icon-btn.del:hover {
+      background: rgba(244, 63, 94, .1);
+      color: var(--red);
+    }
+
+    .icon-btn.dl {
+      color: var(--blue2);
+    }
+
+    .icon-btn.dl:hover {
+      background: rgba(59, 143, 245, .1);
+    }
+
+    .chevron {
+      color: var(--dim);
+      font-size: 22px;
+      font-weight: 300;
+    }
+
+    /* ── Center states ──────────────────────────────────────────────────────── */
+    .center-state {
+      text-align: center;
+      padding: 72px 20px;
+    }
+
+    .center-state .cs-icon {
+      font-size: 52px;
+      display: block;
+      margin-bottom: 14px;
+    }
+
+    .center-state p {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 32px;
+      height: 32px;
+      border: 3px solid var(--border);
+      border-top-color: var(--blue);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      margin-bottom: 14px;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* ── Toast ──────────────────────────────────────────────────────────────── */
+    #toast {
+      position: fixed;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: var(--card2);
+      border: 1px solid var(--border2);
+      color: var(--text);
+      padding: 11px 22px;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 600;
+      opacity: 0;
+      transition: all .3s;
+      z-index: 999;
+      white-space: nowrap;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, .5);
+    }
+
+    #toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    #toast.ok {
+      border-color: rgba(34, 197, 94, .4);
+      color: var(--green);
+    }
+
+    #toast.err {
+      border-color: rgba(244, 63, 94, .4);
+      color: var(--red);
+    }
+
+    /* ── Delete modal ───────────────────────────────────────────────────────── */
+    .overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .7);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .overlay.show {
+      display: flex;
+    }
+
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: 20px;
+      padding: 28px;
+      width: 340px;
+      max-width: 90vw;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, .5);
+    }
+
+    .modal-icon {
+      font-size: 36px;
+      margin-bottom: 12px;
+      display: block;
+    }
+
+    .modal h3 {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .modal p {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 24px;
+      word-break: break-all;
+      line-height: 1.5;
+    }
+
+    .modal-btns {
+      display: flex;
+      gap: 10px;
+    }
+
+    .modal-btns button {
+      flex: 1;
+      padding: 12px;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 14px;
+      cursor: pointer;
+      border: none;
+      transition: opacity .15s;
+    }
+
+    .modal-btns button:hover {
+      opacity: .85;
+    }
+
+    .btn-cancel {
+      background: var(--card2);
+      color: var(--text);
+    }
+
+    .btn-del {
+      background: var(--red);
+      color: #fff;
+    }
+
+    /* ── File count badge ───────────────────────────────────────────────────── */
+    .count-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--card2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 5px 12px;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    #file-input {
+      display: none;
+    }
+
+    /* ── Responsive ─────────────────────────────────────────────────────────── */
+    @media (max-width: 520px) {
+      .main {
+        padding: 20px 14px 60px;
+      }
+
+      .hero h1 {
+        font-size: 24px;
+      }
+
+      .roots-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+
+      .root-card {
+        padding: 16px 12px;
+      }
+    }
+  </style>
 </head>
+
 <body>
 
-<div class="topbar">
-  <div class="logo">Tiny<span>Cell</span> NAS</div>
-  <div class="breadcrumb" id="breadcrumb"></div>
-</div>
-
-<div class="main" id="main">
-  <div class="center"><div class="spinner"></div></div>
-</div>
-
-<div id="toast"></div>
-
-<div class="overlay" id="del-overlay">
-  <div class="modal">
-    <h3>Delete?</h3>
-    <p id="del-name"></p>
-    <div class="modal-btns">
-      <button class="btn-cancel" onclick="closeDelModal()">Cancel</button>
-      <button class="btn-del" onclick="confirmDelete()">Delete</button>
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="logo">
+      <div class="logo-icon">💾</div>
+      Tiny<span class="logo-accent">Cell</span> NAS
+    </div>
+    <div class="breadcrumb" id="breadcrumb"></div>
+    <div class="topbar-right">
+      <div id="topbar-info" style="font-size:12px;color:var(--dim)"></div>
     </div>
   </div>
-</div>
 
-<input type="file" id="file-input" multiple onchange="handleFilePick(this.files)">
+  <div class="main" id="main">
+    <div class="center-state">
+      <div class="spinner"></div>
+      <p>Connecting…</p>
+    </div>
+  </div>
 
-<script>
-const CHUNK_SIZE = 50 * 1024 * 1024; // 50 MB — stays under Cloudflare's 100MB limit
-let currentRoot = null;
-let currentPath = []; // array of path segments
-let deleteTarget = null; // {root, path, name}
+  <!-- Toast -->
+  <div id="toast"></div>
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function qs(params) {
-  return Object.entries(params).map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
-}
-
-function fmtSize(b) {
-  if (b < 1024) return b + ' B';
-  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
-  if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB';
-  return (b/1073741824).toFixed(2) + ' GB';
-}
-
-function fileIcon(name) {
-  const ext = name.split('.').pop().toLowerCase();
-  if (['jpg','jpeg','png','gif','webp','heic','bmp'].includes(ext)) return '🖼️';
-  if (['mp4','mkv','avi','mov','webm','3gp'].includes(ext)) return '🎬';
-  if (['mp3','wav','flac','aac','m4a','ogg'].includes(ext)) return '🎵';
-  if (ext === 'pdf') return '📄';
-  if (['zip','tar','gz','rar','7z'].includes(ext)) return '📦';
-  if (['doc','docx','txt','md','rtf'].includes(ext)) return '📝';
-  if (['xls','xlsx','csv'].includes(ext)) return '📊';
-  if (ext === 'apk') return '📱';
-  return '📄';
-}
-
-function toast(msg, isErr = false) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.className = 'show' + (isErr ? ' err' : '');
-  clearTimeout(el._t);
-  el._t = setTimeout(() => el.className = '', 2800);
-}
-
-// ── Breadcrumb ────────────────────────────────────────────────────────────────
-
-const ROOT_LABELS = { shared: '📱 Storage', downloads: '⬇️ Downloads', dcim: '📷 Camera', home: '🏠 Home' };
-
-function renderBreadcrumb() {
-  const bc = document.getElementById('breadcrumb');
-  if (!currentRoot) { bc.innerHTML = ''; return; }
-  const parts = [{ label: ROOT_LABELS[currentRoot] || currentRoot, idx: -1 }];
-  currentPath.forEach((seg, i) => parts.push({ label: seg, idx: i }));
-  bc.innerHTML = parts.map((p, i) => {
-    const isLast = i === parts.length - 1;
-    const sep = i > 0 ? '<span class="sep"> / </span>' : '';
-    const cls = isLast ? 'seg active' : 'seg';
-    const onclick = isLast ? '' : `onclick="navTo(${p.idx})"`;
-    return `${sep}<span class="${cls}" ${onclick}>${p.label}</span>`;
-  }).join('');
-}
-
-function navTo(idx) {
-  if (idx === -1) { currentRoot = null; currentPath = []; loadRoots(); }
-  else { currentPath = currentPath.slice(0, idx + 1); loadDir(); }
-}
-
-// ── Roots ─────────────────────────────────────────────────────────────────────
-
-const ROOT_META = {
-  shared:    { icon: '📱', label: 'Phone Storage', desc: 'All files on your device' },
-  downloads: { icon: '⬇️', label: 'Downloads',    desc: 'Downloaded files' },
-  dcim:      { icon: '📷', label: 'Camera',        desc: 'Photos and videos' },
-  home:      { icon: '🏠', label: 'Termux Home',   desc: 'Termux scripts & data' },
-};
-
-async function loadRoots() {
-  renderBreadcrumb();
-  document.getElementById('main').innerHTML = '<div class="center"><div class="spinner"></div></div>';
-  try {
-    const res = await fetch('/nas/roots');
-    const roots = await res.json();
-    const cards = Object.entries(ROOT_META).map(([key, meta]) => {
-      const root = roots[key] || {};
-      const avail = root.available;
-      const badge = avail ? '' : '<div class="badge">Run termux-setup-storage</div>';
-      return `<div class="root-card${avail ? '' : ' unavailable'}" onclick="openRoot('${key}')">
-        <div class="icon">${meta.icon}</div>
-        <div class="label">${meta.label}</div>
-        <div class="desc">${meta.desc}</div>
-        ${badge}
-      </div>`;
-    }).join('');
-    document.getElementById('main').innerHTML = `
-      <div class="page-title">NAS Storage</div>
-      <div class="page-sub">Select a location to browse and transfer files</div>
-      <div class="roots-grid">${cards}</div>
-      <div class="tip">💡 <strong>Tip:</strong> If a location is unavailable, open Termux and run <code>termux-setup-storage</code></div>
-    `;
-  } catch(e) {
-    document.getElementById('main').innerHTML = `<div class="center"><p>Failed to load. Make sure you're connected to TinyCell.</p></div>`;
-  }
-}
-
-function openRoot(name) {
-  currentRoot = name;
-  currentPath = [];
-  loadDir();
-}
-
-// ── Directory browser ─────────────────────────────────────────────────────────
-
-async function loadDir() {
-  renderBreadcrumb();
-  document.getElementById('main').innerHTML = '<div class="center"><div class="spinner"></div></div>';
-  try {
-    const path = currentPath.join('/');
-    const q = qs(path ? { root: currentRoot, path } : { root: currentRoot });
-    const res = await fetch(`/nas/browse?${q}`);
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    renderDir(data.items || []);
-  } catch(e) {
-    document.getElementById('main').innerHTML = `<div class="center"><p style="color:#F43F5E">${e.message}</p><br><button onclick="loadDir()" style="background:#1C2A3D;color:#F0F6FF;border:none;padding:8px 16px;border-radius:8px;cursor:pointer">Retry</button></div>`;
-  }
-}
-
-function renderDir(items) {
-  const path = currentPath.join('/');
-  const rows = items.length === 0
-    ? '<div class="center"><div class="big">📂</div><p>Empty folder</p></div>'
-    : `<div class="file-list">${items.map(item => renderRow(item)).join('')}</div>`;
-
-  document.getElementById('main').innerHTML = `
-    <div class="toolbar">
-      <button class="upload-btn" id="upload-btn" onclick="document.getElementById('file-input').click()">⬆ Upload</button>
-      <div class="progress-wrap" id="progress-wrap" style="display:none">
-        <div class="progress-bar-bg"><div class="progress-bar" id="progress-bar"></div></div>
-        <div class="progress-label" id="progress-label">Uploading…</div>
+  <!-- Delete confirm modal -->
+  <div class="overlay" id="del-overlay">
+    <div class="modal">
+      <span class="modal-icon">🗑️</span>
+      <h3>Delete this file?</h3>
+      <p id="del-name"></p>
+      <div class="modal-btns">
+        <button class="btn-cancel" onclick="closeDelModal()">Cancel</button>
+        <button class="btn-del" onclick="confirmDelete()">Delete</button>
       </div>
     </div>
-    ${rows}
-  `;
-}
+  </div>
 
-function renderRow(item) {
-  const icon = item.is_dir ? '📁' : fileIcon(item.name);
-  const meta = item.is_dir ? '' : `<div class="fmeta">${fmtSize(item.size)}</div>`;
-  const nameClick = item.is_dir ? `openFolder('${esc(item.name)}')` : `downloadFile('${esc(item.name)}')`;
-  const actions = item.is_dir
-    ? `<span class="chevron">›</span>`
-    : `<button class="dl-btn" onclick="downloadFile('${esc(item.name)}')">⬇ Download</button>
-       <button class="del-btn" title="Delete" onclick="askDelete('${esc(item.name)}', false)">🗑</button>`;
-  return `<div class="file-row">
-    <span class="ficon">${icon}</span>
-    <div class="info"><div class="fname" onclick="${nameClick}">${escHtml(item.name)}</div>${meta}</div>
-    <div class="actions">${actions}</div>
-  </div>`;
-}
+  <input type="file" id="file-input" multiple onchange="handleFilePick(this.files)">
 
-function esc(s) { return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
-function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  <script>
+    // ── Config ────────────────────────────────────────────────────────────────────
+    const CHUNK_SIZE = 50 * 1024 * 1024; // 50 MB per chunk
 
-function openFolder(name) {
-  currentPath.push(name);
-  loadDir();
-}
+    // ── State ─────────────────────────────────────────────────────────────────────
+    let currentRoot = null;
+    let currentPath = [];
+    let deleteTarget = null;
+    let uploadQueue = [];
+    let isUploading = false;
 
-function downloadFile(name) {
-  const filePath = [...currentPath, name].join('/');
-  const q = qs({ root: currentRoot, path: filePath });
-  window.open(`/nas/download?${q}`, '_blank');
-}
+    // ── Helpers ───────────────────────────────────────────────────────────────────
+    const qs = p => Object.entries(p).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
 
-// ── Delete ─────────────────────────────────────────────────────────────────────
+    const esc = s => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const escH = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-function askDelete(name, isDir) {
-  deleteTarget = { name, isDir };
-  document.getElementById('del-name').textContent = name;
-  document.getElementById('del-overlay').classList.add('show');
-}
+    function fmtSize(b) {
+      if (b < 1024) return b + ' B';
+      if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+      if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+      return (b / 1073741824).toFixed(2) + ' GB';
+    }
 
-function closeDelModal() {
-  deleteTarget = null;
-  document.getElementById('del-overlay').classList.remove('show');
-}
+    function fmtDate(ts) {
+      const d = new Date(ts * 1000);
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    }
 
-async function confirmDelete() {
-  if (!deleteTarget) return;
-  const { name } = deleteTarget;
-  closeDelModal();
-  const filePath = [...currentPath, name].join('/');
-  const q = qs({ root: currentRoot, path: filePath });
-  try {
-    const res = await fetch(`/nas/delete?${q}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    toast(`Deleted: ${name}`);
-    loadDir();
-  } catch(e) {
-    toast(`Error: ${e.message}`, true);
-  }
-}
+    function fileIcon(name) {
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'bmp', 'svg'].includes(ext)) return '🖼️';
+      if (['mp4', 'mkv', 'avi', 'mov', 'webm', '3gp', 'm4v'].includes(ext)) return '🎬';
+      if (['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(ext)) return '🎵';
+      if (ext === 'pdf') return '📄';
+      if (['zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz'].includes(ext)) return '📦';
+      if (['doc', 'docx', 'txt', 'md', 'rtf'].includes(ext)) return '📝';
+      if (['xls', 'xlsx', 'csv'].includes(ext)) return '📊';
+      if (['js', 'ts', 'py', 'go', 'rs', 'java', 'cpp', 'c', 'html', 'css', 'json'].includes(ext)) return '💻';
+      if (ext === 'apk') return '📱';
+      return '📄';
+    }
 
-// ── Upload (chunked) ──────────────────────────────────────────────────────────
+    function toast(msg, type = '') {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.className = 'show' + (type ? ' ' + type : '');
+      clearTimeout(el._t);
+      el._t = setTimeout(() => el.className = '', 3000);
+    }
 
-async function handleFilePick(files) {
-  if (!files.length) return;
-  const btn = document.getElementById('upload-btn');
-  const progressWrap = document.getElementById('progress-wrap');
-  const progressBar = document.getElementById('progress-bar');
-  const progressLabel = document.getElementById('progress-label');
-  btn.disabled = true;
-  progressWrap.style.display = 'block';
-  let done = 0;
-  for (const file of files) {
-    await uploadFileChunked(file, (pct) => {
-      const overall = ((done + pct / 100) / files.length * 100).toFixed(0);
-      progressBar.style.width = overall + '%';
-      progressLabel.textContent = `Uploading ${file.name} (${Math.round(pct)}%)…`;
-    });
-    done++;
-    toast(`✓ Uploaded: ${file.name}`);
-  }
-  progressWrap.style.display = 'none';
-  progressBar.style.width = '0';
-  btn.disabled = false;
-  document.getElementById('file-input').value = '';
-  loadDir();
-}
+    // ── Breadcrumb ─────────────────────────────────────────────────────────────────
+    const ROOT_LABELS = {
+      shared: '📱 Storage', downloads: '⬇️ Downloads',
+      dcim: '📷 Camera', home: '🏠 Termux Home'
+    };
 
-async function uploadFileChunked(file, onProgress) {
-  const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-  const path = currentPath.join('/');
-  for (let i = 0; i < totalChunks; i++) {
-    const start = i * CHUNK_SIZE;
-    const chunk = file.slice(start, start + CHUNK_SIZE);
-    const form = new FormData();
-    form.append('file', chunk, file.name);
-    const q = qs({ root: currentRoot, path, filename: file.name, chunk_index: i, total_chunks: totalChunks });
-    const res = await fetch(`/nas/upload-chunk?${q}`, { method: 'POST', body: form });
-    if (!res.ok) throw new Error(`Upload failed (chunk ${i})`);
-    onProgress((i + 1) / totalChunks * 100);
-  }
-}
+    const ROOT_META = {
+      shared: { icon: '📱', label: 'Phone Storage', desc: 'All shared files on your phone' },
+      downloads: { icon: '⬇️', label: 'Downloads', desc: 'Downloaded files' },
+      dcim: { icon: '📷', label: 'Camera', desc: 'Photos and videos' },
+      home: { icon: '🏠', label: 'Termux Home', desc: 'Termux scripts & app data' },
+    };
 
-// ── Init ──────────────────────────────────────────────────────────────────────
+    function renderBreadcrumb() {
+      const bc = document.getElementById('breadcrumb');
+      if (!currentRoot) { bc.innerHTML = ''; return; }
+      const parts = [{ label: ROOT_LABELS[currentRoot] || currentRoot, idx: -1 }];
+      currentPath.forEach((seg, i) => parts.push({ label: seg, idx: i }));
+      bc.innerHTML = parts.map((p, i) => {
+        const isLast = i === parts.length - 1;
+        const sep = i > 0 ? '<span class="bc-sep">/</span>' : '';
+        const cls = 'bc-seg' + (isLast ? ' active' : '');
+        const onclick = isLast ? '' : `onclick="navTo(${p.idx})"`;
+        return `${sep}<span class="${cls}" ${onclick}>${escH(p.label)}</span>`;
+      }).join('');
+    }
 
-loadRoots();
-</script>
+    function navTo(idx) {
+      if (idx === -1) { currentRoot = null; currentPath = []; loadRoots(); }
+      else { currentPath = currentPath.slice(0, idx + 1); loadDir(); }
+    }
+
+    // ── Roots ─────────────────────────────────────────────────────────────────────
+    async function loadRoots() {
+      currentRoot = null; currentPath = [];
+      renderBreadcrumb();
+      setMain(`<div class="center-state"><div class="spinner"></div><p>Loading storage locations…</p></div>`);
+      try {
+        const roots = await apiFetch('/nas/roots');
+        const cards = Object.entries(ROOT_META).map(([key, meta]) => {
+          const avail = roots[key]?.available;
+          return `
+        <div class="root-card${avail ? '' : ' unavail'}" onclick="openRoot('${key}')">
+          <span class="root-icon">${meta.icon}</span>
+          <div class="root-label">${meta.label}</div>
+          <div class="root-desc">${meta.desc}</div>
+          ${avail ? '<span class="root-arrow">›</span>' : '<span class="root-badge">run termux-setup-storage</span>'}
+        </div>`;
+        }).join('');
+        setMain(`
+      <div class="hero">
+        <span class="hero-icon">💾</span>
+        <h1>TinyCell <span>NAS</span></h1>
+        <p>Browse files on the phone, upload from any device — all over the internet.</p>
+      </div>
+      <div class="roots-grid">${cards}</div>
+      <div class="tip-box">💡 <strong>Tip:</strong> If a location shows unavailable, run <code>termux-setup-storage</code> in Termux first.</div>
+    `);
+      } catch (e) {
+        setMain(`<div class="center-state"><span class="cs-icon">⚠️</span><p style="color:var(--red)">Could not connect to TinyCell. Make sure the agent is running.</p></div>`);
+      }
+    }
+
+    function openRoot(name) {
+      currentRoot = name; currentPath = [];
+      loadDir();
+    }
+
+    // ── Directory browser ─────────────────────────────────────────────────────────
+    async function loadDir() {
+      renderBreadcrumb();
+      setMain(`<div class="center-state"><div class="spinner"></div></div>`);
+      try {
+        const path = currentPath.join('/');
+        const q = qs(path ? { root: currentRoot, path } : { root: currentRoot });
+        const data = await apiFetch(`/nas/browse?${q}`);
+        if (data.error) throw new Error(data.error);
+        renderDir(data.items || []);
+      } catch (e) {
+        setMain(`
+      <div class="center-state">
+        <span class="cs-icon">⚠️</span>
+        <p style="color:var(--red)">${escH(e.message)}</p>
+        <button class="btn btn-outline" style="margin-top:16px" onclick="loadDir()">↺ Retry</button>
+      </div>`);
+      }
+    }
+
+    function renderDir(items) {
+      const dirs = items.filter(i => i.is_dir);
+      const files = items.filter(i => !i.is_dir);
+      const sorted = [...dirs, ...files];
+
+      const fileRows = sorted.length === 0
+        ? `<div class="center-state"><span class="cs-icon">📂</span><p>Empty folder</p></div>`
+        : `<div class="file-list">
+        <div class="file-list-header">
+          <span style="flex:1">Name</span>
+          <span style="min-width:90px;text-align:right">Size</span>
+          <span style="width:80px"></span>
+        </div>
+        ${sorted.map(renderRow).join('')}
+      </div>`;
+
+      const countLabel = `${files.length} file${files.length !== 1 ? 's' : ''}, ${dirs.length} folder${dirs.length !== 1 ? 's' : ''}`;
+
+      setMain(`
+    <div class="toolbar">
+      <button class="btn btn-blue" onclick="triggerFilePick()">⬆ Upload Files</button>
+      <div class="count-badge">📁 ${escH(countLabel)}</div>
+    </div>
+    <div class="drop-zone" id="drop-zone" onclick="triggerFilePick()">
+      <div class="dz-icon">☁️</div>
+      Drop files here or <strong>click to upload</strong>
+      <small>Large files are automatically split into chunks</small>
+    </div>
+    <div class="upload-queue" id="upload-queue" style="display:none"></div>
+    ${fileRows}
+  `);
+
+      // Wire up drag-and-drop
+      const dz = document.getElementById('drop-zone');
+      if (dz) {
+        dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
+        dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+        dz.addEventListener('drop', e => {
+          e.preventDefault(); dz.classList.remove('drag-over');
+          if (e.dataTransfer.files.length) handleFilePick(e.dataTransfer.files);
+        });
+      }
+    }
+
+    function renderRow(item) {
+      const icon = item.is_dir ? '📁' : fileIcon(item.name);
+      const meta = item.is_dir ? '<div class="fmeta">Folder</div>' : `<div class="fmeta">${fmtSize(item.size)} · ${fmtDate(item.modified)}</div>`;
+      const click = item.is_dir ? `openFolder('${esc(item.name)}')` : `downloadFile('${esc(item.name)}')`;
+      const right = item.is_dir
+        ? `<span class="chevron">›</span>`
+        : `<div class="factions">
+        <button class="icon-btn dl" title="Download" onclick="downloadFile('${esc(item.name)}');event.stopPropagation()">⬇</button>
+        <button class="icon-btn del" title="Delete" onclick="askDelete('${esc(item.name)}');event.stopPropagation()">🗑</button>
+      </div>`;
+      return `
+    <div class="file-row" onclick="${click}">
+      <span class="ficon">${icon}</span>
+      <div class="finfo"><div class="fname">${escH(item.name)}</div>${meta}</div>
+      ${right}
+    </div>`;
+    }
+
+    function openFolder(name) { currentPath.push(name); loadDir(); }
+
+    function downloadFile(name) {
+      const fp = [...currentPath, name].join('/');
+      window.open(`/nas/download?${qs({ root: currentRoot, path: fp })}`, '_blank');
+    }
+
+    function triggerFilePick() { document.getElementById('file-input').click(); }
+
+    // ── Delete ─────────────────────────────────────────────────────────────────────
+    function askDelete(name) {
+      deleteTarget = name;
+      document.getElementById('del-name').textContent = name;
+      document.getElementById('del-overlay').classList.add('show');
+    }
+    function closeDelModal() {
+      deleteTarget = null;
+      document.getElementById('del-overlay').classList.remove('show');
+    }
+    async function confirmDelete() {
+      if (!deleteTarget) return;
+      const name = deleteTarget; closeDelModal();
+      const path = [...currentPath, name].join('/');
+      try {
+        const data = await apiFetch(`/nas/delete?${qs({ root: currentRoot, path })}`, { method: 'DELETE' });
+        if (data.error) throw new Error(data.error);
+        toast(`✓ Deleted: ${name}`, 'ok');
+        loadDir();
+      } catch (e) { toast(`Error: ${e.message}`, 'err'); }
+    }
+
+    // ── Upload ─────────────────────────────────────────────────────────────────────
+    async function handleFilePick(files) {
+      if (!files.length) return;
+      const queueEl = document.getElementById('upload-queue');
+      if (!queueEl) return; // not on dir view
+      queueEl.style.display = 'flex';
+      document.getElementById('file-input').value = '';
+
+      const items = Array.from(files).map(file => {
+        const id = 'uq-' + Math.random().toString(36).slice(2);
+        const icon = fileIcon(file.name);
+        queueEl.insertAdjacentHTML('beforeend', `
+      <div class="upload-item" id="${id}">
+        <span class="ui-icon">${icon}</span>
+        <div class="ui-info">
+          <div class="ui-name">${escH(file.name)}</div>
+          <div class="ui-bar-bg"><div class="ui-bar" id="${id}-bar"></div></div>
+        </div>
+        <span class="ui-pct" id="${id}-pct">0%</span>
+      </div>`);
+        return { file, id };
+      });
+
+      for (const { file, id } of items) {
+        const itemEl = document.getElementById(id);
+        const barEl = document.getElementById(id + '-bar');
+        const pctEl = document.getElementById(id + '-pct');
+        try {
+          await uploadChunked(file, pct => {
+            barEl.style.width = pct + '%';
+            pctEl.textContent = Math.round(pct) + '%';
+          });
+          itemEl?.classList.add('done');
+          pctEl.textContent = '✓';
+          toast(`✓ Uploaded: ${file.name}`, 'ok');
+        } catch (e) {
+          itemEl?.classList.add('err');
+          pctEl.textContent = '✗';
+          toast(`Failed: ${file.name}`, 'err');
+        }
+      }
+      setTimeout(() => loadDir(), 600);
+    }
+
+    async function uploadChunked(file, onProgress) {
+      const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+      const path = currentPath.join('/');
+      for (let i = 0; i < totalChunks; i++) {
+        const chunk = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        const form = new FormData();
+        form.append('file', chunk, file.name);
+        const q = qs({ root: currentRoot, path, filename: file.name, chunk_index: i, total_chunks: totalChunks });
+        const res = await fetch(`/nas/upload-chunk?${q}`, { method: 'POST', body: form });
+        if (!res.ok) throw new Error(`Chunk ${i} failed`);
+        onProgress((i + 1) / totalChunks * 100);
+      }
+    }
+
+    // ── Utilities ─────────────────────────────────────────────────────────────────
+    function setMain(html) { document.getElementById('main').innerHTML = html; }
+
+    async function apiFetch(url, opts) {
+      const res = await fetch(url, opts);
+      return res.json();
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────────
+    loadRoots();
+  </script>
 </body>
+
 </html>
