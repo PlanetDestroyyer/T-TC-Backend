@@ -339,6 +339,56 @@ async def _kill_self():
     os.kill(os.getpid(), signal.SIGTERM)
 
 
+@app.post("/system/update")
+async def system_update():
+    """
+    Pull latest backend code, update all deployed apps, then restart the agent.
+    The agent re-spawns itself via start.sh and kills the current process.
+    """
+    agent_dir = os.path.dirname(os.path.abspath(__file__))
+    start_sh  = os.path.join(agent_dir, "start.sh")
+
+    # 1. Pull latest backend code
+    try:
+        result = subprocess.run(
+            ["git", "pull"], cwd=agent_dir,
+            capture_output=True, text=True, timeout=60
+        )
+        print(f"🔄 git pull: {result.stdout.strip() or result.stderr.strip()}")
+    except Exception as e:
+        print(f"⚠️ git pull failed: {e}")
+
+    # 2. Update all apps + restart agent (non-blocking)
+    asyncio.create_task(_update_all_and_restart(start_sh))
+    return {"status": "updating"}
+
+
+async def _update_all_and_restart(start_sh: str):
+    """Update every deployed app then restart the agent process."""
+    try:
+        await deployer.update_all_apps()
+    except Exception as e:
+        print(f"⚠️ update_all_apps error: {e}")
+
+    # Spawn fresh agent, then kill self
+    try:
+        if os.path.exists(start_sh):
+            subprocess.Popen(
+                ["bash", start_sh],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            print("🚀 New agent process spawned via start.sh")
+        else:
+            print(f"⚠️ start.sh not found at {start_sh}")
+    except Exception as e:
+        print(f"⚠️ Failed to spawn new agent: {e}")
+
+    await asyncio.sleep(2)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 @app.post("/thermal/emergency-shutdown")
 def manual_emergency_shutdown():
     """Manually trigger emergency shutdown of all running apps."""

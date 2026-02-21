@@ -441,6 +441,18 @@ def shutdown_all():
     _save(reg)
 
 
+async def update_all_apps() -> dict:
+    """Pull latest code and restart every registered app. Returns {app_id: deploy_id}."""
+    reg = _load()
+    app_ids = list(reg["apps"].keys())
+    results = {}
+    tasks = []
+    for app_id in app_ids:
+        deploy_id = await update_app(app_id)
+        results[app_id] = deploy_id
+    return results
+
+
 def restore_on_startup():
     reg = _load()
     for app_id, app in reg["apps"].items():
