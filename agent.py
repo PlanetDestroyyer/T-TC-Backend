@@ -342,11 +342,9 @@ async def _kill_self():
 @app.post("/system/update")
 async def system_update():
     """
-    Pull latest backend code, update all deployed apps, then restart the agent.
-    The agent re-spawns itself via start.sh and kills the current process.
+    Pull latest backend code, cleanly stop all running apps, then restart the agent.
     """
     agent_dir = os.path.dirname(os.path.abspath(__file__))
-    start_sh  = os.path.join(agent_dir, "start.sh")
 
     # 1. Pull latest backend code
     try:
@@ -358,21 +356,19 @@ async def system_update():
     except Exception as e:
         print(f"⚠️ git pull failed: {e}")
 
-    # 2. Update all apps + restart agent (non-blocking)
-    asyncio.create_task(_update_all_and_restart(start_sh))
+    # 2. Cleanly stop all apps + restart agent (non-blocking)
+    asyncio.create_task(_shutdown_and_restart(agent_dir))
     return {"status": "updating"}
 
 
-async def _update_all_and_restart(start_sh: str):
-    """Update every deployed app then restart the agent process."""
+async def _shutdown_and_restart(agent_dir: str):
+    """Cleanly stop all running apps (flushes registry), then restart the agent."""
     try:
-        await deployer.update_all_apps()
+        deployer.shutdown_all()
+        print("✅ All apps stopped cleanly")
     except Exception as e:
-        print(f"⚠️ update_all_apps error: {e}")
+        print(f"⚠️ shutdown_all error: {e}")
 
-    # Spawn fresh agent directly via venv python — bypasses start.sh which calls
-    # termux-wake-lock and BLOCKS in non-interactive (no-terminal) subprocesses.
-    agent_dir = os.path.dirname(os.path.abspath(start_sh))
     venv_python = os.path.join(agent_dir, "venv", "bin", "python")
     restart_log = os.path.join(agent_dir, "restart.log")
     try:
@@ -380,9 +376,9 @@ async def _update_all_and_restart(start_sh: str):
             cmd = f"sleep 5 && cd {agent_dir} && {venv_python} agent.py >> {restart_log} 2>&1"
             proc = subprocess.Popen(
                 ["bash", "-c", cmd],
-                start_new_session=True,   # detach from terminal session (setsid)
-                stdin=subprocess.DEVNULL,  # don't inherit terminal stdin
-                stdout=subprocess.DEVNULL, # bash output is redirected inside cmd
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             print(f"🚀 New agent scheduled in 5s (PID {proc.pid}, logs → restart.log)")
