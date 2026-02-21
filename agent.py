@@ -342,53 +342,41 @@ async def _kill_self():
 @app.post("/system/update")
 async def system_update():
     """
-    Pull latest backend code, cleanly stop all running apps, then restart the agent.
+    Stop all running apps cleanly, then hand off to restart.sh which
+    pulls latest code and starts a fresh agent.
     """
     agent_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # 1. Pull latest backend code
-    try:
-        result = subprocess.run(
-            ["git", "pull"], cwd=agent_dir,
-            capture_output=True, text=True, timeout=60
-        )
-        print(f"🔄 git pull: {result.stdout.strip() or result.stderr.strip()}")
-    except Exception as e:
-        print(f"⚠️ git pull failed: {e}")
-
-    # 2. Cleanly stop all apps + restart agent (non-blocking)
     asyncio.create_task(_shutdown_and_restart(agent_dir))
     return {"status": "updating"}
 
 
 async def _shutdown_and_restart(agent_dir: str):
-    """Cleanly stop all running apps (flushes registry), then restart the agent."""
+    """Stop all apps, then hand off to restart.sh (pull + start)."""
     try:
         deployer.shutdown_all()
         print("✅ All apps stopped cleanly")
     except Exception as e:
         print(f"⚠️ shutdown_all error: {e}")
 
-    venv_python = os.path.join(agent_dir, "venv", "bin", "python")
+    restart_sh  = os.path.join(agent_dir, "restart.sh")
     restart_log = os.path.join(agent_dir, "restart.log")
     try:
-        if os.path.exists(venv_python):
-            cmd = f"sleep 5 && cd {agent_dir} && {venv_python} agent.py > {restart_log} 2>&1"
+        if os.path.exists(restart_sh):
             proc = subprocess.Popen(
-                ["bash", "-c", cmd],
-                start_new_session=True,
+                ["bash", restart_sh],
+                start_new_session=True,   # detach — survives parent's os._exit
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=open(restart_log, "w"),
+                stderr=subprocess.STDOUT,
             )
-            print(f"🚀 New agent scheduled in 5s (PID {proc.pid}, logs → restart.log)")
+            print(f"🚀 restart.sh launched (PID {proc.pid}, logs → restart.log)")
         else:
-            print(f"⚠️ venv python not found at {venv_python}")
+            print(f"⚠️ restart.sh not found at {restart_sh}")
     except Exception as e:
-        print(f"⚠️ Failed to schedule new agent: {e}")
+        print(f"⚠️ Failed to launch restart.sh: {e}")
 
     await asyncio.sleep(0.5)
-    os._exit(0)  # Hard exit — frees port 8000 immediately so new agent can bind
+    os._exit(0)  # Free port 8000; restart.sh takes over after sleep 3
 
 
 @app.post("/thermal/emergency-shutdown")
