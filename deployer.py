@@ -44,11 +44,8 @@ def _load() -> dict:
 
 def _save(reg: dict):
     os.makedirs(APPS_DIR, exist_ok=True)
-    # Write to a temp file then atomically rename — prevents corruption if killed mid-write
-    tmp = _REGISTRY + ".tmp"
-    with open(tmp, "w") as f:
+    with open(_REGISTRY, "w") as f:
         json.dump(reg, f, indent=2)
-    os.replace(tmp, _REGISTRY)
 
 
 # ─── Activity Log ─────────────────────────────────────────────────────────────
