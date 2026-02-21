@@ -377,9 +377,15 @@ async def _update_all_and_restart(start_sh: str):
     restart_log = os.path.join(agent_dir, "restart.log")
     try:
         if os.path.exists(venv_python):
-            cmd = f"sleep 3 && cd {agent_dir} && {venv_python} agent.py >> {restart_log} 2>&1"
-            subprocess.Popen(["bash", "-c", cmd], start_new_session=True)
-            print(f"🚀 New agent scheduled in 3s (logs → restart.log)")
+            cmd = f"sleep 5 && cd {agent_dir} && {venv_python} agent.py >> {restart_log} 2>&1"
+            proc = subprocess.Popen(
+                ["bash", "-c", cmd],
+                start_new_session=True,   # detach from terminal session (setsid)
+                stdin=subprocess.DEVNULL,  # don't inherit terminal stdin
+                stdout=subprocess.DEVNULL, # bash output is redirected inside cmd
+                stderr=subprocess.DEVNULL,
+            )
+            print(f"🚀 New agent scheduled in 5s (PID {proc.pid}, logs → restart.log)")
         else:
             print(f"⚠️ venv python not found at {venv_python}")
     except Exception as e:
