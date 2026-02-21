@@ -386,7 +386,7 @@ async def _update_all_and_restart(start_sh: str):
         print(f"⚠️ Failed to spawn new agent: {e}")
 
     await asyncio.sleep(2)
-    os.kill(os.getpid(), signal.SIGTERM)
+    os._exit(0)  # Hard exit — skips GC/asyncio __del__ cleanup to avoid noisy traceback
 
 
 @app.post("/thermal/emergency-shutdown")
