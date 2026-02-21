@@ -699,20 +699,37 @@
         const barEl = document.getElementById(id + 'b');
         const pctEl = document.getElementById(id + 'p');
         try {
-          await uploadChunked(file, pct => { barEl.style.width = pct + '%'; pctEl.textContent = Math.round(pct) + '%'; });
+          await uploadFile(file, pct => { barEl.style.width = pct + '%'; pctEl.textContent = Math.round(pct) + '%'; });
           document.getElementById(id)?.classList.add('done');
           pctEl.textContent = '✓';
           toast(`✓ ${file.name} uploaded`, 'ok');
         } catch (e) {
           document.getElementById(id)?.classList.add('err');
           pctEl.textContent = '✗';
-          toast(`Failed: ${file.name}`, 'err');
+          toast(`✗ ${file.name}: ${e.message}`, 'err');
         }
       }
 
-      setTimeout(() => { qEl.innerHTML = ''; loadDir(); }, 800);
+      setTimeout(() => { qEl.innerHTML = ''; loadDir(); }, 1200);
     }
 
+    async function uploadFile(file, onProg) {
+      const dir = path.join('/');
+      const form = new FormData();
+      form.append('file', file, file.name);
+      const q = qs(dir ? { root: ROOT, path: dir } : { root: ROOT });
+      onProg(10);
+      const res = await fetch(`/nas/upload?${q}`, { method: 'POST', body: form });
+      onProg(90);
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try { const j = await res.json(); msg = j.error || msg; } catch (_) {}
+        throw new Error(msg);
+      }
+      onProg(100);
+    }
+
+    // Large-file chunked upload (used for files > CHUNK bytes via uploadChunked if needed)
     async function uploadChunked(file, onProg) {
       const total = Math.max(1, Math.ceil(file.size / CHUNK));
       const dir = path.join('/');
@@ -721,7 +738,11 @@
         const form = new FormData(); form.append('file', chunk, file.name);
         const q = qs({ root: ROOT, path: dir, filename: file.name, chunk_index: i, total_chunks: total });
         const res = await fetch(`/nas/upload-chunk?${q}`, { method: 'POST', body: form });
-        if (!res.ok) throw new Error(`Chunk ${i} failed`);
+        if (!res.ok) {
+          let msg = `chunk ${i} HTTP ${res.status}`;
+          try { const j = await res.json(); msg = j.error || msg; } catch (_) {}
+          throw new Error(msg);
+        }
         onProg((i + 1) / total * 100);
       }
     }
