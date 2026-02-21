@@ -370,20 +370,20 @@ async def _update_all_and_restart(start_sh: str):
     except Exception as e:
         print(f"⚠️ update_all_apps error: {e}")
 
-    # Spawn fresh agent, then kill self
+    # Spawn fresh agent directly via venv python — bypasses start.sh which calls
+    # termux-wake-lock and BLOCKS in non-interactive (no-terminal) subprocesses.
+    agent_dir = os.path.dirname(os.path.abspath(start_sh))
+    venv_python = os.path.join(agent_dir, "venv", "bin", "python")
+    restart_log = os.path.join(agent_dir, "restart.log")
     try:
-        if os.path.exists(start_sh):
-            subprocess.Popen(
-                ["bash", "-c", f"sleep 3 && bash {start_sh}"],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            print("🚀 New agent scheduled to start in 3s")
+        if os.path.exists(venv_python):
+            cmd = f"sleep 3 && cd {agent_dir} && {venv_python} agent.py >> {restart_log} 2>&1"
+            subprocess.Popen(["bash", "-c", cmd], start_new_session=True)
+            print(f"🚀 New agent scheduled in 3s (logs → restart.log)")
         else:
-            print(f"⚠️ start.sh not found at {start_sh}")
+            print(f"⚠️ venv python not found at {venv_python}")
     except Exception as e:
-        print(f"⚠️ Failed to spawn new agent: {e}")
+        print(f"⚠️ Failed to schedule new agent: {e}")
 
     await asyncio.sleep(0.5)
     os._exit(0)  # Hard exit — frees port 8000 immediately so new agent can bind
