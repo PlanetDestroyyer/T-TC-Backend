@@ -509,7 +509,16 @@
   <header>
     <div class="logo-box">💾</div>
     <h1>Tiny<span>Cell</span> NAS</h1>
-    <div class="hdr-right" id="hdr-info"></div>
+    <div class="hdr-right">
+      <select id="root-select" onchange="switchRoot(this.value)"
+        style="background:#1a2641;color:#c9d8f0;border:1px solid #2e4a7a;border-radius:8px;padding:5px 10px;font-size:13px;cursor:pointer;">
+        <option value="home">🏠 Home</option>
+        <option value="shared">📱 Shared Storage</option>
+        <option value="downloads">⬇️ Downloads</option>
+        <option value="dcim">📷 DCIM</option>
+      </select>
+      <span id="hdr-info" style="font-size:12px;color:#6b85b0;"></span>
+    </div>
   </header>
 
   <div class="wrap">
@@ -549,9 +558,15 @@
 
   <script>
     const CHUNK = 50 * 1024 * 1024;
-    const ROOT = 'shared'; // always browse shared phone storage
+    let ROOT = 'home'; // default to home — always accessible without termux-setup-storage
     let path = [];       // current folder segments
     let delTarget = null;
+
+    function switchRoot(newRoot) {
+      ROOT = newRoot;
+      path = [];
+      loadDir();
+    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────────
     const qs = p => Object.entries(p).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
