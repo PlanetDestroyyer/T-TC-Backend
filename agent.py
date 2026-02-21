@@ -374,19 +374,19 @@ async def _update_all_and_restart(start_sh: str):
     try:
         if os.path.exists(start_sh):
             subprocess.Popen(
-                ["bash", start_sh],
+                ["bash", "-c", f"sleep 3 && bash {start_sh}"],
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            print("🚀 New agent process spawned via start.sh")
+            print("🚀 New agent scheduled to start in 3s")
         else:
             print(f"⚠️ start.sh not found at {start_sh}")
     except Exception as e:
         print(f"⚠️ Failed to spawn new agent: {e}")
 
-    await asyncio.sleep(2)
-    os._exit(0)  # Hard exit — skips GC/asyncio __del__ cleanup to avoid noisy traceback
+    await asyncio.sleep(0.5)
+    os._exit(0)  # Hard exit — frees port 8000 immediately so new agent can bind
 
 
 @app.post("/thermal/emergency-shutdown")

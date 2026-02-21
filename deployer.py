@@ -441,16 +441,29 @@ def shutdown_all():
     _save(reg)
 
 
-async def update_all_apps() -> dict:
-    """Pull latest code and restart every registered app. Returns {app_id: deploy_id}."""
+async def update_all_apps() -> None:
+    """Pull latest code and restart every registered app. Fully awaits all updates."""
     reg = _load()
     app_ids = list(reg["apps"].keys())
-    results = {}
+    if not app_ids:
+        return
+
+    # Build _run_update coroutines directly — do NOT use update_app() which
+    # fire-and-forgets background tasks and returns immediately.
     tasks = []
     for app_id in app_ids:
-        deploy_id = await update_app(app_id)
-        results[app_id] = deploy_id
-    return results
+        deploy_id = uuid.uuid4().hex[:8]
+        _deployments[deploy_id] = {
+            "status": "deploying",
+            "app_name": app_id,
+            "steps": [],
+            "error": None,
+            "app_id": app_id,
+        }
+        tasks.append(_run_update(deploy_id, app_id))
+
+    # Run all app updates in parallel and wait for ALL to finish
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def restore_on_startup():
