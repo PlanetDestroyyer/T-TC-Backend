@@ -632,6 +632,10 @@ async def nas_upload_chunk(
 
 NAS_ROOTS: dict = {
     "shared_nas": os.path.expanduser("~/storage/shared/shared_nas"),
+    "shared":     os.path.expanduser("~/storage/shared"),
+    "downloads":  os.path.expanduser("~/storage/downloads"),
+    "dcim":       os.path.expanduser("~/storage/dcim"),
+    "home":       os.path.expanduser("~"),
 }
 
 def _nas_resolve(root_name: str, subpath: str):
@@ -732,10 +736,13 @@ async def nas_upload(
     file: UploadFile = File(...),
 ):
     """Upload a file to the given directory. Streams in 64 KB chunks."""
+    print(f"[NAS] Upload request: root={root!r} path={path!r} file={file.filename!r}")
     _, target_dir = _nas_resolve(root, path)
     if target_dir is None:
+        print(f"[NAS] Upload denied: invalid root={root!r} or path traversal in path={path!r}")
         return JSONResponse(status_code=403, content={"error": "Access denied"})
     if not os.path.isdir(target_dir):
+        print(f"[NAS] Upload failed: target is not a directory: {target_dir!r}")
         return JSONResponse(status_code=400, content={"error": "Not a directory"})
 
     dest = os.path.join(target_dir, file.filename or "upload")
@@ -746,10 +753,15 @@ async def nas_upload(
                 if not chunk:
                     break
                 f.write(chunk)
+        size = os.path.getsize(dest)
+        print(f"[NAS] Uploaded OK: {dest!r} ({size} bytes)")
+        return {"uploaded": file.filename, "size": size}
     except PermissionError:
+        print(f"[NAS] Upload permission denied: {dest!r}")
         return JSONResponse(status_code=403, content={"error": "Write permission denied"})
-
-    return {"uploaded": file.filename, "size": os.path.getsize(dest)}
+    except Exception as e:
+        print(f"[NAS] Upload error: {e!r}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.delete("/nas/delete")
