@@ -272,10 +272,11 @@ async def _run_update(deploy_id: str, app_id: str):
         _log_activity("update", app_id, f"url={tunnel_url}")
 
     except Exception as e:
-        step(f"Error: {e}", err=True)
+        msg = str(e) or f"{type(e).__name__} (no message)"
+        step(f"Error: {msg}", err=True)
         _deployments[deploy_id]["status"] = "error"
-        _deployments[deploy_id]["error"] = str(e)
-        _log_activity("update_error", app_id, str(e))
+        _deployments[deploy_id]["error"] = msg
+        _log_activity("update_error", app_id, msg)
 
 
 
@@ -343,12 +344,13 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         _log_activity("deploy", app_name, f"type={app_type} url={tunnel_url}")
 
     except Exception as e:
-        step(f"Error: {e}", err=True)
+        msg = str(e) or f"{type(e).__name__} (no message)"
+        step(f"Error: {msg}", err=True)
         _deployments[deploy_id]["status"] = "error"
-        _deployments[deploy_id]["error"] = str(e)
+        _deployments[deploy_id]["error"] = msg
         port_manager.release(app_name)
         shutil.rmtree(app_dir, ignore_errors=True)
-        _log_activity("deploy_error", app_name, str(e))
+        _log_activity("deploy_error", app_name, msg)
 
 
 # ─── Background tasks ────────────────────────────────────────────────────────
@@ -565,9 +567,12 @@ async def _install_deps(app_dir: str, app_type: str):
         if os.path.exists(req):
             await _run_async(
                 [venv_pip, "install", "--no-cache-dir", "-r", "requirements.txt"],
-                cwd=app_dir, timeout=300,
+                cwd=app_dir, timeout=600,
             )
     elif app_type == "react":
-        await _run_async(["npm", "install", "-g", "serve"], timeout=60)
-        await _run_async(["npm", "install"], cwd=app_dir, timeout=300)
-        await _run_async(["npm", "run", "build"], cwd=app_dir, timeout=300)
+        # Install serve globally only if not already present
+        import shutil as _shutil
+        if not _shutil.which("serve"):
+            await _run_async(["npm", "install", "-g", "serve"], timeout=120)
+        await _run_async(["npm", "install"], cwd=app_dir, timeout=900)
+        await _run_async(["npm", "run", "build"], cwd=app_dir, timeout=900)
