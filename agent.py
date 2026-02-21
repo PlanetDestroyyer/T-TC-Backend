@@ -1,7 +1,8 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Query
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import mimetypes
 import os
 import signal
 import platform
@@ -433,20 +434,158 @@ async def websocket_status(websocket: WebSocket):
         import traceback
         traceback.print_exc()
 
-# --- File Browser (NAS Foundation) ---
+# ─── NAS File Browser ─────────────────────────────────────────────────────────
+
+NAS_ROOTS: dict = {
+    "home":      os.path.expanduser("~"),
+    "shared":    os.path.expanduser("~/storage/shared"),
+    "downloads": os.path.expanduser("~/storage/downloads"),
+    "dcim":      os.path.expanduser("~/storage/dcim"),
+}
+
+def _nas_resolve(root_name: str, subpath: str):
+    """Resolve root + subpath to absolute path. Returns (root_abs, target_abs) or (None, None)."""
+    root_raw = NAS_ROOTS.get(root_name)
+    if not root_raw:
+        return None, None
+    root_abs = os.path.realpath(root_raw)
+    target_abs = os.path.realpath(os.path.join(root_abs, subpath.lstrip("/")))
+    if not target_abs.startswith(root_abs):
+        return None, None  # block path traversal
+    return root_abs, target_abs
+
+
+@app.get("/nas/roots")
+def nas_roots():
+    """List available NAS storage roots."""
+    result = {}
+    for name, raw in NAS_ROOTS.items():
+        expanded = os.path.expanduser(raw)
+        result[name] = {
+            "path": expanded,
+            "available": os.path.isdir(expanded),
+        }
+    return result
+
+
+@app.get("/nas/browse")
+def nas_browse(root: str = Query(...), path: str = Query(default="")):
+    """List directory contents."""
+    _, target = _nas_resolve(root, path)
+    if target is None:
+        return JSONResponse(status_code=403, content={"error": "Access denied"})
+    if not os.path.exists(target):
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    if not os.path.isdir(target):
+        return JSONResponse(status_code=400, content={"error": "Not a directory"})
+
+    items = []
+    try:
+        for entry in os.scandir(target):
+            try:
+                stat = entry.stat(follow_symlinks=False)
+                items.append({
+                    "name": entry.name,
+                    "is_dir": entry.is_dir(follow_symlinks=False),
+                    "size": stat.st_size if not entry.is_dir() else 0,
+                    "modified": int(stat.st_mtime),
+                })
+            except (PermissionError, OSError):
+                continue
+    except PermissionError:
+        return JSONResponse(status_code=403, content={"error": "Permission denied"})
+
+    items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+    return {"root": root, "path": path, "items": items}
+
+
+@app.get("/nas/download")
+def nas_download(root: str = Query(...), path: str = Query(...)):
+    """Stream a file download."""
+    _, target = _nas_resolve(root, path)
+    if target is None:
+        return JSONResponse(status_code=403, content={"error": "Access denied"})
+    if not os.path.exists(target) or not os.path.isfile(target):
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+
+    mime, _ = mimetypes.guess_type(target)
+    mime = mime or "application/octet-stream"
+    filename = os.path.basename(target)
+
+    def streamer():
+        with open(target, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+
+    return StreamingResponse(
+        streamer(),
+        media_type=mime,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.post("/nas/upload")
+async def nas_upload(
+    root: str = Query(...),
+    path: str = Query(default=""),
+    file: UploadFile = File(...),
+):
+    """Upload a file to the given directory. Streams in 64 KB chunks."""
+    _, target_dir = _nas_resolve(root, path)
+    if target_dir is None:
+        return JSONResponse(status_code=403, content={"error": "Access denied"})
+    if not os.path.isdir(target_dir):
+        return JSONResponse(status_code=400, content={"error": "Not a directory"})
+
+    dest = os.path.join(target_dir, file.filename or "upload")
+    try:
+        with open(dest, "wb") as f:
+            while True:
+                chunk = await file.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except PermissionError:
+        return JSONResponse(status_code=403, content={"error": "Write permission denied"})
+
+    return {"uploaded": file.filename, "size": os.path.getsize(dest)}
+
+
+@app.delete("/nas/delete")
+def nas_delete(root: str = Query(...), path: str = Query(...)):
+    """Delete a file or empty directory."""
+    _, target = _nas_resolve(root, path)
+    if target is None:
+        return JSONResponse(status_code=403, content={"error": "Access denied"})
+    if not os.path.exists(target):
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    try:
+        if os.path.isdir(target):
+            os.rmdir(target)
+        else:
+            os.remove(target)
+    except PermissionError:
+        return JSONResponse(status_code=403, content={"error": "Permission denied"})
+    except OSError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"deleted": path}
+
+
+# --- Legacy File Browser (kept for backward compat) ---
 @app.get("/files/{path:path}")
 def list_files(path: str):
-    """List files in a directory or serve a file"""
-    # Security: Prevent escaping root (basic implementation)
-    base_path = os.path.expanduser("~") # Use home directory
+    base_path = os.path.expanduser("~")
     target_path = os.path.abspath(os.path.join(base_path, path))
-    
     if not target_path.startswith(base_path):
         return JSONResponse(status_code=403, content={"error": "Access denied"})
-    
     if os.path.isfile(target_path):
         return FileResponse(target_path)
-    
     if os.path.isdir(target_path):
         items = []
         try:
@@ -457,10 +596,8 @@ def list_files(path: str):
                     "size": entry.stat().st_size if not entry.is_dir() else 0
                 })
         except PermissionError:
-             return JSONResponse(status_code=403, content={"error": "Permission denied"})
-             
+            return JSONResponse(status_code=403, content={"error": "Permission denied"})
         return {"path": path, "items": items}
-        
     return JSONResponse(status_code=404, content={"error": "Not found"})
 
 def run_https_server():

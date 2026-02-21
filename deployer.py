@@ -22,6 +22,7 @@ _URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 _pids: dict = {}         # {app_id: {app_pid, tunnel_pid}}
 running_apps: dict = {}  # {app_id: pid} — shared with thermal manager
 _deployments: dict = {}  # {deploy_id: progress dict}
+_tunnel_fail: dict = {}  # {app_id: consecutive_fail_count}
 
 
 # ─── Registry ────────────────────────────────────────────────────────────────
@@ -329,6 +330,7 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
             "status": "running",
             "pid": proc.pid,
             "tunnel_url": tunnel_url,
+            "tunnel_status": "active" if tunnel_url else "dead",
             "app_dir": app_dir,
             "auto_restart": auto_restart,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -351,29 +353,74 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
 
 # ─── Background tasks ────────────────────────────────────────────────────────
 
+async def _probe_tunnel(url: str) -> bool:
+    """Return True if the tunnel URL responds with any HTTP status."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "curl", "-sf", "--max-time", "8", "-o", "/dev/null", url,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=12)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
 async def monitor_loop():
+    tick = 0
     while True:
         await asyncio.sleep(10)
+        tick += 1
         reg = _load()
         changed = False
+
         for app_id, app in list(reg["apps"].items()):
-            if app.get("status") != "running" or not app.get("auto_restart"):
+            if app.get("status") != "running":
                 continue
+
+            # ── App crash check (every tick) ──────────────────────────────
             pid = _pids.get(app_id, {}).get("app_pid")
-            if pid and not _is_alive(pid):
-                print(f"⚠️ App '{app_id}' crashed, restarting app process...")
+            if pid and not _is_alive(pid) and app.get("auto_restart"):
+                print(f"⚠️ App '{app_id}' crashed, restarting...")
                 proc = _launch_app(app)
                 if proc:
                     _pids.setdefault(app_id, {})["app_pid"] = proc.pid
                     running_apps[app_id] = proc.pid
                     reg["apps"][app_id]["pid"] = proc.pid
                     reg["apps"][app_id]["restart_count"] = app.get("restart_count", 0) + 1
-                    # Only restart tunnel if it's also dead
                     tunnel_pid = _pids.get(app_id, {}).get("tunnel_pid")
                     if not tunnel_pid or not _is_alive(tunnel_pid):
-                        print(f"🌐 Tunnel also dead for '{app_id}', restarting tunnel...")
                         asyncio.create_task(_setup_tunnel(app_id, app["port"]))
                     changed = True
+
+            # ── Tunnel keepalive + health check (every 12 ticks = 2 min) ──
+            if tick % 12 == 0:
+                tunnel_url = app.get("tunnel_url")
+                if not tunnel_url:
+                    # No URL yet — might be reconnecting already
+                    continue
+                alive = await _probe_tunnel(tunnel_url)
+                if alive:
+                    _tunnel_fail.pop(app_id, None)
+                    if app.get("tunnel_status") != "active":
+                        reg["apps"][app_id]["tunnel_status"] = "active"
+                        changed = True
+                else:
+                    fails = _tunnel_fail.get(app_id, 0) + 1
+                    _tunnel_fail[app_id] = fails
+                    print(f"⚠️ Tunnel for '{app_id}' unresponsive (fail #{fails})")
+                    if fails >= 2:
+                        print(f"🔄 Restarting tunnel for '{app_id}'...")
+                        reg["apps"][app_id]["tunnel_status"] = "reconnecting"
+                        reg["apps"][app_id]["tunnel_url"] = None
+                        changed = True
+                        _tunnel_fail.pop(app_id, None)
+                        asyncio.create_task(_setup_tunnel(app_id, app["port"]))
+                    else:
+                        reg["apps"][app_id]["tunnel_status"] = "checking"
+                        changed = True
+
         if changed:
             _save(reg)
 
@@ -485,7 +532,8 @@ async def _setup_tunnel(app_id: str, port: int) -> str:
     url = await _wait_for_tunnel_url(app_id)
     reg = _load()
     if app_id in reg["apps"]:
-        reg["apps"][app_id]["tunnel_url"] = url
+        reg["apps"][app_id]["tunnel_url"] = url or None
+        reg["apps"][app_id]["tunnel_status"] = "active" if url else "dead"
         _save(reg)
     print(f"🌐 Tunnel ready for '{app_id}': {url}")
     return url
