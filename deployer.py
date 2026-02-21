@@ -29,15 +29,26 @@ _tunnel_fail: dict = {}  # {app_id: consecutive_fail_count}
 
 def _load() -> dict:
     if os.path.exists(_REGISTRY):
-        with open(_REGISTRY) as f:
-            return json.load(f)
+        try:
+            with open(_REGISTRY) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"⚠️ Registry corrupt ({e}), resetting to empty")
+            # Back up the corrupt file for inspection
+            try:
+                os.rename(_REGISTRY, _REGISTRY + ".corrupt")
+            except OSError:
+                pass
     return {"apps": {}}
 
 
 def _save(reg: dict):
     os.makedirs(APPS_DIR, exist_ok=True)
-    with open(_REGISTRY, "w") as f:
+    # Write to a temp file then atomically rename — prevents corruption if killed mid-write
+    tmp = _REGISTRY + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(reg, f, indent=2)
+    os.replace(tmp, _REGISTRY)
 
 
 # ─── Activity Log ─────────────────────────────────────────────────────────────
