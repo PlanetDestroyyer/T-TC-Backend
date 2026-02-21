@@ -666,7 +666,11 @@ def nas_browse(root: str = Query(...), path: str = Query(default="")):
     if target is None:
         return JSONResponse(status_code=403, content={"error": "Access denied"})
     if not os.path.exists(target):
-        return JSONResponse(status_code=404, content={"error": "Not found"})
+        # Auto-create the shared_nas folder if it doesn't exist yet
+        try:
+            os.makedirs(target, exist_ok=True)
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"Could not create folder: {e}"})
     if not os.path.isdir(target):
         return JSONResponse(status_code=400, content={"error": "Not a directory"})
 

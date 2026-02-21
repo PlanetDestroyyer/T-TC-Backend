@@ -52,8 +52,6 @@ echo "./venv/bin/python agent.py" >> start.sh
 chmod +x start.sh
 
 echo ""
-echo "✅ Setup Complete!"
+echo "✅ Setup Complete! Starting agent now..."
 echo "-----------------------------------------------"
-echo "Run this command to start the agent:"
-echo "./start.sh"
-echo "-----------------------------------------------"
+./start.sh
