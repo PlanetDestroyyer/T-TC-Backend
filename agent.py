@@ -1,9 +1,10 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Query
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Query
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mimetypes
 import os
+import sys
 import signal
 import platform
 import shutil
@@ -17,6 +18,40 @@ import uvicorn
 from threading import Thread
 import deployer
 
+# ─── Persistent Logging ──────────────────────────────────────────────────────
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.log")
+
+class _Tee:
+    """Mirror all stdout/stderr to main.log with timestamps. Appends across restarts."""
+    def __init__(self, stream):
+        self._stream = stream
+        self._file = open(_LOG_PATH, "a", buffering=1, encoding="utf-8")
+
+    def write(self, msg):
+        self._stream.write(msg)
+        if msg.strip():
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            for line in msg.rstrip("\n").split("\n"):
+                if line.strip():
+                    self._file.write(f"[{ts}] {line}\n")
+
+    def flush(self):
+        self._stream.flush()
+        self._file.flush()
+
+    def fileno(self):
+        return self._stream.fileno()
+
+    def isatty(self):
+        return self._stream.isatty()
+
+sys.stdout = _Tee(sys.stdout)
+sys.stderr = _Tee(sys.stderr)
+print("=" * 60)
+print(f"🟢 Agent process started  PID={os.getpid()}")
+print("=" * 60)
+# ─────────────────────────────────────────────────────────────────────────────
+
 app = FastAPI()
 
 # Enable CORS for React Native
@@ -27,6 +62,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    t0 = time.time()
+    response = await call_next(request)
+    ms = int((time.time() - t0) * 1000)
+    print(f"[HTTP] {request.method} {request.url.path} → {response.status_code} ({ms}ms)")
+    return response
 
 def run_command(command, timeout=1):
     """Run a shell command and return the output"""
