@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TinyCell NAS</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #080F1A; color: #F0F6FF; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+  a { color: inherit; text-decoration: none; }
+
+  /* Layout */
+  .topbar { background: #0F1D2E; border-bottom: 1px solid #243349; padding: 14px 20px; display: flex; align-items: center; gap: 14px; }
+  .logo { font-size: 18px; font-weight: 800; letter-spacing: 0.3px; }
+  .logo span { color: #4D9FFF; }
+  .breadcrumb { flex: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; font-size: 13px; color: #8BA3BF; overflow: hidden; }
+  .breadcrumb .seg { cursor: pointer; padding: 3px 6px; border-radius: 6px; white-space: nowrap; }
+  .breadcrumb .seg:hover { background: #162032; color: #F0F6FF; }
+  .breadcrumb .sep { color: #4E6580; }
+  .breadcrumb .seg.active { color: #F0F6FF; font-weight: 700; }
+
+  .main { padding: 20px; max-width: 900px; margin: 0 auto; }
+
+  /* Roots */
+  .roots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .root-card { background: #162032; border: 1px solid #243349; border-radius: 14px; padding: 20px; cursor: pointer; transition: border-color .15s, transform .1s; }
+  .root-card:hover { border-color: #4D9FFF; transform: translateY(-1px); }
+  .root-card.unavailable { opacity: .45; cursor: default; pointer-events: none; }
+  .root-card .icon { font-size: 30px; margin-bottom: 10px; }
+  .root-card .label { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+  .root-card .desc { color: #8BA3BF; font-size: 12px; }
+  .root-card .badge { margin-top: 8px; font-size: 11px; color: #F59E0B; background: #2D1A00; border: 1px solid #F59E0B; border-radius: 6px; padding: 3px 8px; display: inline-block; }
+
+  /* Toolbar */
+  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .upload-btn { background: #4D9FFF; color: #fff; border: none; padding: 9px 18px; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  .upload-btn:hover { background: #3a8eee; }
+  .upload-btn:disabled { background: #1C2A3D; color: #4E6580; cursor: default; }
+  #file-input { display: none; }
+
+  /* Progress */
+  .progress-wrap { flex: 1; min-width: 180px; }
+  .progress-bar-bg { background: #1C2A3D; border-radius: 6px; height: 8px; overflow: hidden; }
+  .progress-bar { background: #4D9FFF; height: 100%; border-radius: 6px; width: 0; transition: width .2s; }
+  .progress-label { font-size: 11px; color: #8BA3BF; margin-top: 4px; }
+
+  /* File list */
+  .file-list { border: 1px solid #243349; border-radius: 14px; overflow: hidden; }
+  .file-row { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid #1C2A3D; transition: background .1s; }
+  .file-row:last-child { border-bottom: none; }
+  .file-row:hover { background: #162032; }
+  .file-row .ficon { font-size: 20px; width: 26px; text-align: center; flex-shrink: 0; }
+  .file-row .info { flex: 1; min-width: 0; }
+  .file-row .fname { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .file-row .fname:hover { color: #4D9FFF; }
+  .file-row .fmeta { font-size: 11px; color: #4E6580; margin-top: 2px; }
+  .file-row .actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .dl-btn { background: #1C2A3D; border: 1px solid #2E4160; color: #4D9FFF; padding: 5px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .dl-btn:hover { background: #243349; }
+  .del-btn { background: transparent; border: none; color: #4E6580; font-size: 18px; cursor: pointer; padding: 2px 4px; }
+  .del-btn:hover { color: #F43F5E; }
+  .chevron { color: #4E6580; font-size: 20px; font-weight: 300; }
+
+  /* Empty / loading */
+  .center { text-align: center; padding: 60px 20px; color: #4E6580; }
+  .center .big { font-size: 48px; margin-bottom: 12px; }
+  .center p { font-size: 14px; }
+  .spinner { display: inline-block; width: 28px; height: 28px; border: 3px solid #243349; border-top-color: #4D9FFF; border-radius: 50%; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Toast */
+  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(60px); background: #162032; border: 1px solid #243349; color: #F0F6FF; padding: 10px 20px; border-radius: 10px; font-size: 13px; font-weight: 600; opacity: 0; transition: all .3s; z-index: 999; white-space: nowrap; }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.err { border-color: #F43F5E; color: #F43F5E; }
+
+  /* Delete confirm modal */
+  .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100; align-items: center; justify-content: center; }
+  .overlay.show { display: flex; }
+  .modal { background: #0F1D2E; border: 1px solid #243349; border-radius: 16px; padding: 24px; width: 320px; max-width: 90vw; }
+  .modal h3 { margin-bottom: 8px; font-size: 16px; }
+  .modal p { color: #8BA3BF; font-size: 13px; margin-bottom: 20px; word-break: break-all; }
+  .modal-btns { display: flex; gap: 10px; }
+  .modal-btns button { flex: 1; padding: 10px; border-radius: 10px; font-weight: 700; font-size: 14px; cursor: pointer; border: none; }
+  .btn-cancel { background: #1C2A3D; color: #F0F6FF; }
+  .btn-del { background: #F43F5E; color: #fff; }
+
+  /* Page title */
+  .page-title { font-size: 26px; font-weight: 800; margin-bottom: 6px; }
+  .page-sub { color: #8BA3BF; font-size: 13px; margin-bottom: 24px; }
+
+  /* Tip */
+  .tip { background: #162032; border: 1px solid #243349; border-radius: 12px; padding: 14px 16px; font-size: 13px; color: #8BA3BF; margin-top: 20px; line-height: 1.6; }
+  .tip code { color: #86EFAC; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">Tiny<span>Cell</span> NAS</div>
+  <div class="breadcrumb" id="breadcrumb"></div>
+</div>
+
+<div class="main" id="main">
+  <div class="center"><div class="spinner"></div></div>
+</div>
+
+<div id="toast"></div>
+
+<div class="overlay" id="del-overlay">
+  <div class="modal">
+    <h3>Delete?</h3>
+    <p id="del-name"></p>
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="closeDelModal()">Cancel</button>
+      <button class="btn-del" onclick="confirmDelete()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="file-input" multiple onchange="handleFilePick(this.files)">
+
+<script>
+const CHUNK_SIZE = 50 * 1024 * 1024; // 50 MB — stays under Cloudflare's 100MB limit
+let currentRoot = null;
+let currentPath = []; // array of path segments
+let deleteTarget = null; // {root, path, name}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function qs(params) {
+  return Object.entries(params).map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+}
+
+function fmtSize(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB';
+  return (b/1073741824).toFixed(2) + ' GB';
+}
+
+function fileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  if (['jpg','jpeg','png','gif','webp','heic','bmp'].includes(ext)) return '🖼️';
+  if (['mp4','mkv','avi','mov','webm','3gp'].includes(ext)) return '🎬';
+  if (['mp3','wav','flac','aac','m4a','ogg'].includes(ext)) return '🎵';
+  if (ext === 'pdf') return '📄';
+  if (['zip','tar','gz','rar','7z'].includes(ext)) return '📦';
+  if (['doc','docx','txt','md','rtf'].includes(ext)) return '📝';
+  if (['xls','xlsx','csv'].includes(ext)) return '📊';
+  if (ext === 'apk') return '📱';
+  return '📄';
+}
+
+function toast(msg, isErr = false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show' + (isErr ? ' err' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.className = '', 2800);
+}
+
+// ── Breadcrumb ────────────────────────────────────────────────────────────────
+
+const ROOT_LABELS = { shared: '📱 Storage', downloads: '⬇️ Downloads', dcim: '📷 Camera', home: '🏠 Home' };
+
+function renderBreadcrumb() {
+  const bc = document.getElementById('breadcrumb');
+  if (!currentRoot) { bc.innerHTML = ''; return; }
+  const parts = [{ label: ROOT_LABELS[currentRoot] || currentRoot, idx: -1 }];
+  currentPath.forEach((seg, i) => parts.push({ label: seg, idx: i }));
+  bc.innerHTML = parts.map((p, i) => {
+    const isLast = i === parts.length - 1;
+    const sep = i > 0 ? '<span class="sep"> / </span>' : '';
+    const cls = isLast ? 'seg active' : 'seg';
+    const onclick = isLast ? '' : `onclick="navTo(${p.idx})"`;
+    return `${sep}<span class="${cls}" ${onclick}>${p.label}</span>`;
+  }).join('');
+}
+
+function navTo(idx) {
+  if (idx === -1) { currentRoot = null; currentPath = []; loadRoots(); }
+  else { currentPath = currentPath.slice(0, idx + 1); loadDir(); }
+}
+
+// ── Roots ─────────────────────────────────────────────────────────────────────
+
+const ROOT_META = {
+  shared:    { icon: '📱', label: 'Phone Storage', desc: 'All files on your device' },
+  downloads: { icon: '⬇️', label: 'Downloads',    desc: 'Downloaded files' },
+  dcim:      { icon: '📷', label: 'Camera',        desc: 'Photos and videos' },
+  home:      { icon: '🏠', label: 'Termux Home',   desc: 'Termux scripts & data' },
+};
+
+async function loadRoots() {
+  renderBreadcrumb();
+  document.getElementById('main').innerHTML = '<div class="center"><div class="spinner"></div></div>';
+  try {
+    const res = await fetch('/nas/roots');
+    const roots = await res.json();
+    const cards = Object.entries(ROOT_META).map(([key, meta]) => {
+      const root = roots[key] || {};
+      const avail = root.available;
+      const badge = avail ? '' : '<div class="badge">Run termux-setup-storage</div>';
+      return `<div class="root-card${avail ? '' : ' unavailable'}" onclick="openRoot('${key}')">
+        <div class="icon">${meta.icon}</div>
+        <div class="label">${meta.label}</div>
+        <div class="desc">${meta.desc}</div>
+        ${badge}
+      </div>`;
+    }).join('');
+    document.getElementById('main').innerHTML = `
+      <div class="page-title">NAS Storage</div>
+      <div class="page-sub">Select a location to browse and transfer files</div>
+      <div class="roots-grid">${cards}</div>
+      <div class="tip">💡 <strong>Tip:</strong> If a location is unavailable, open Termux and run <code>termux-setup-storage</code></div>
+    `;
+  } catch(e) {
+    document.getElementById('main').innerHTML = `<div class="center"><p>Failed to load. Make sure you're connected to TinyCell.</p></div>`;
+  }
+}
+
+function openRoot(name) {
+  currentRoot = name;
+  currentPath = [];
+  loadDir();
+}
+
+// ── Directory browser ─────────────────────────────────────────────────────────
+
+async function loadDir() {
+  renderBreadcrumb();
+  document.getElementById('main').innerHTML = '<div class="center"><div class="spinner"></div></div>';
+  try {
+    const path = currentPath.join('/');
+    const q = qs(path ? { root: currentRoot, path } : { root: currentRoot });
+    const res = await fetch(`/nas/browse?${q}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    renderDir(data.items || []);
+  } catch(e) {
+    document.getElementById('main').innerHTML = `<div class="center"><p style="color:#F43F5E">${e.message}</p><br><button onclick="loadDir()" style="background:#1C2A3D;color:#F0F6FF;border:none;padding:8px 16px;border-radius:8px;cursor:pointer">Retry</button></div>`;
+  }
+}
+
+function renderDir(items) {
+  const path = currentPath.join('/');
+  const rows = items.length === 0
+    ? '<div class="center"><div class="big">📂</div><p>Empty folder</p></div>'
+    : `<div class="file-list">${items.map(item => renderRow(item)).join('')}</div>`;
+
+  document.getElementById('main').innerHTML = `
+    <div class="toolbar">
+      <button class="upload-btn" id="upload-btn" onclick="document.getElementById('file-input').click()">⬆ Upload</button>
+      <div class="progress-wrap" id="progress-wrap" style="display:none">
+        <div class="progress-bar-bg"><div class="progress-bar" id="progress-bar"></div></div>
+        <div class="progress-label" id="progress-label">Uploading…</div>
+      </div>
+    </div>
+    ${rows}
+  `;
+}
+
+function renderRow(item) {
+  const icon = item.is_dir ? '📁' : fileIcon(item.name);
+  const meta = item.is_dir ? '' : `<div class="fmeta">${fmtSize(item.size)}</div>`;
+  const nameClick = item.is_dir ? `openFolder('${esc(item.name)}')` : `downloadFile('${esc(item.name)}')`;
+  const actions = item.is_dir
+    ? `<span class="chevron">›</span>`
+    : `<button class="dl-btn" onclick="downloadFile('${esc(item.name)}')">⬇ Download</button>
+       <button class="del-btn" title="Delete" onclick="askDelete('${esc(item.name)}', false)">🗑</button>`;
+  return `<div class="file-row">
+    <span class="ficon">${icon}</span>
+    <div class="info"><div class="fname" onclick="${nameClick}">${escHtml(item.name)}</div>${meta}</div>
+    <div class="actions">${actions}</div>
+  </div>`;
+}
+
+function esc(s) { return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function openFolder(name) {
+  currentPath.push(name);
+  loadDir();
+}
+
+function downloadFile(name) {
+  const filePath = [...currentPath, name].join('/');
+  const q = qs({ root: currentRoot, path: filePath });
+  window.open(`/nas/download?${q}`, '_blank');
+}
+
+// ── Delete ─────────────────────────────────────────────────────────────────────
+
+function askDelete(name, isDir) {
+  deleteTarget = { name, isDir };
+  document.getElementById('del-name').textContent = name;
+  document.getElementById('del-overlay').classList.add('show');
+}
+
+function closeDelModal() {
+  deleteTarget = null;
+  document.getElementById('del-overlay').classList.remove('show');
+}
+
+async function confirmDelete() {
+  if (!deleteTarget) return;
+  const { name } = deleteTarget;
+  closeDelModal();
+  const filePath = [...currentPath, name].join('/');
+  const q = qs({ root: currentRoot, path: filePath });
+  try {
+    const res = await fetch(`/nas/delete?${q}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    toast(`Deleted: ${name}`);
+    loadDir();
+  } catch(e) {
+    toast(`Error: ${e.message}`, true);
+  }
+}
+
+// ── Upload (chunked) ──────────────────────────────────────────────────────────
+
+async function handleFilePick(files) {
+  if (!files.length) return;
+  const btn = document.getElementById('upload-btn');
+  const progressWrap = document.getElementById('progress-wrap');
+  const progressBar = document.getElementById('progress-bar');
+  const progressLabel = document.getElementById('progress-label');
+  btn.disabled = true;
+  progressWrap.style.display = 'block';
+  let done = 0;
+  for (const file of files) {
+    await uploadFileChunked(file, (pct) => {
+      const overall = ((done + pct / 100) / files.length * 100).toFixed(0);
+      progressBar.style.width = overall + '%';
+      progressLabel.textContent = `Uploading ${file.name} (${Math.round(pct)}%)…`;
+    });
+    done++;
+    toast(`✓ Uploaded: ${file.name}`);
+  }
+  progressWrap.style.display = 'none';
+  progressBar.style.width = '0';
+  btn.disabled = false;
+  document.getElementById('file-input').value = '';
+  loadDir();
+}
+
+async function uploadFileChunked(file, onProgress) {
+  const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+  const path = currentPath.join('/');
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const chunk = file.slice(start, start + CHUNK_SIZE);
+    const form = new FormData();
+    form.append('file', chunk, file.name);
+    const q = qs({ root: currentRoot, path, filename: file.name, chunk_index: i, total_chunks: totalChunks });
+    const res = await fetch(`/nas/upload-chunk?${q}`, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(`Upload failed (chunk ${i})`);
+    onProgress((i + 1) / totalChunks * 100);
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+loadRoots();
+</script>
+</body>
+</html>

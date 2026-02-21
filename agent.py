@@ -315,6 +315,30 @@ def get_thermal():
     }
 
 
+@app.post("/shutdown")
+async def shutdown_server():
+    """Stop all apps, NAS server, and terminate the agent process."""
+    try:
+        deployer.shutdown_all()
+    except Exception as e:
+        print(f"⚠️ shutdown_all error: {e}")
+    try:
+        nas_proc = _nas_state.get("proc")
+        if nas_proc:
+            nas_proc.terminate()
+        _nas_state["proc"] = None
+        _nas_state["url"] = None
+    except Exception as e:
+        print(f"⚠️ NAS teardown error: {e}")
+    asyncio.create_task(_kill_self())
+    return {"status": "shutting_down"}
+
+
+async def _kill_self():
+    await asyncio.sleep(0.5)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 @app.post("/thermal/emergency-shutdown")
 def manual_emergency_shutdown():
     """Manually trigger emergency shutdown of all running apps."""
@@ -433,6 +457,126 @@ async def websocket_status(websocket: WebSocket):
         print(f"❌ WebSocket error: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
+
+# ─── NAS Public Server (Cloudflare Tunnel) ───────────────────────────────────
+
+import re as _re
+
+_NAS_URL_RE = _re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+_NAS_TUNNEL_LOG = os.path.expanduser("~/.nas_tunnel.log")
+_NAS_CHUNKS_DIR = os.path.expanduser("~/.nas_chunks")
+_nas_state: dict = {"proc": None, "url": None}
+
+
+def _nas_tunnel_alive() -> bool:
+    proc = _nas_state.get("proc")
+    return bool(proc and proc.poll() is None)
+
+
+async def _wait_nas_url():
+    for _ in range(40):
+        await asyncio.sleep(1)
+        try:
+            m = _NAS_URL_RE.search(open(_NAS_TUNNEL_LOG).read())
+            if m:
+                _nas_state["url"] = m.group(0)
+                print(f"🌐 NAS public URL: {_nas_state['url']}")
+                return
+        except Exception:
+            pass
+    print("⚠️ NAS tunnel URL not found within 40s")
+
+
+@app.get("/nas/public/status")
+def nas_public_status():
+    alive = _nas_tunnel_alive()
+    if not alive:
+        _nas_state["url"] = None
+    return {"running": alive, "url": _nas_state.get("url")}
+
+
+@app.post("/nas/public/start")
+async def nas_public_start():
+    if _nas_tunnel_alive():
+        return {"running": True, "url": _nas_state.get("url")}
+    try:
+        open(_NAS_TUNNEL_LOG, "w").close()
+    except Exception:
+        pass
+    with open(_NAS_TUNNEL_LOG, "w") as lf:
+        proc = subprocess.Popen(
+            ["cloudflared", "tunnel", "--url", "http://localhost:8000"],
+            stdout=lf, stderr=subprocess.STDOUT,
+        )
+    _nas_state["proc"] = proc
+    _nas_state["url"] = None
+    asyncio.create_task(_wait_nas_url())
+    return {"running": True, "url": None}
+
+
+@app.post("/nas/public/stop")
+def nas_public_stop():
+    proc = _nas_state.get("proc")
+    if proc:
+        proc.terminate()
+    _nas_state["proc"] = None
+    _nas_state["url"] = None
+    return {"status": "stopped"}
+
+
+@app.get("/nas/ui")
+def nas_ui():
+    ui_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nas_ui.html")
+    if os.path.exists(ui_path):
+        return FileResponse(ui_path, media_type="text/html")
+    return JSONResponse(status_code=404, content={"error": "UI not found"})
+
+
+@app.post("/nas/upload-chunk")
+async def nas_upload_chunk(
+    root: str = Query(...),
+    path: str = Query(default=""),
+    filename: str = Query(...),
+    chunk_index: int = Query(...),
+    total_chunks: int = Query(...),
+    file: UploadFile = File(...),
+):
+    """Receive one chunk of a large file. Assembles automatically when all chunks arrive."""
+    safe_name = os.path.basename(filename)
+    if not safe_name:
+        return JSONResponse(status_code=400, content={"error": "Invalid filename"})
+
+    chunk_dir = os.path.join(_NAS_CHUNKS_DIR, safe_name)
+    os.makedirs(chunk_dir, exist_ok=True)
+
+    chunk_path = os.path.join(chunk_dir, f"{chunk_index:06d}")
+    with open(chunk_path, "wb") as f:
+        while True:
+            data = await file.read(65536)
+            if not data:
+                break
+            f.write(data)
+
+    received = len(os.listdir(chunk_dir))
+    if received >= total_chunks:
+        _, target_dir = _nas_resolve(root, path)
+        if target_dir is None:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+            return JSONResponse(status_code=403, content={"error": "Access denied"})
+        dest = os.path.join(target_dir, safe_name)
+        try:
+            with open(dest, "wb") as out:
+                for i in range(total_chunks):
+                    with open(os.path.join(chunk_dir, f"{i:06d}"), "rb") as cf:
+                        shutil.copyfileobj(cf, out)
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+            return {"status": "complete", "filename": safe_name, "size": os.path.getsize(dest)}
+        except Exception as e:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+            return JSONResponse(status_code=500, content={"error": str(e)})
+
+    return {"status": "chunk_received", "received": received, "total": total_chunks}
+
 
 # ─── NAS File Browser ─────────────────────────────────────────────────────────
 

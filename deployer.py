@@ -427,6 +427,20 @@ async def monitor_loop():
             _save(reg)
 
 
+def shutdown_all():
+    """Kill every running app and tunnel immediately."""
+    for app_id in list(_pids.keys()):
+        pids = _pids.pop(app_id, {})
+        _kill(pids.get("app_pid"))
+        _kill(pids.get("proxy_pid"))
+        _kill(pids.get("tunnel_pid"))
+    running_apps.clear()
+    reg = _load()
+    for app_id in reg["apps"]:
+        reg["apps"][app_id]["status"] = "stopped"
+    _save(reg)
+
+
 def restore_on_startup():
     reg = _load()
     for app_id, app in reg["apps"].items():
