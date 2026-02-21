@@ -373,7 +373,7 @@ async def _shutdown_and_restart(agent_dir: str):
     restart_log = os.path.join(agent_dir, "restart.log")
     try:
         if os.path.exists(venv_python):
-            cmd = f"sleep 5 && cd {agent_dir} && {venv_python} agent.py >> {restart_log} 2>&1"
+            cmd = f"sleep 5 && cd {agent_dir} && {venv_python} agent.py > {restart_log} 2>&1"
             proc = subprocess.Popen(
                 ["bash", "-c", cmd],
                 start_new_session=True,
