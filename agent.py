@@ -631,10 +631,7 @@ async def nas_upload_chunk(
 # ─── NAS File Browser ─────────────────────────────────────────────────────────
 
 NAS_ROOTS: dict = {
-    "home":      os.path.expanduser("~"),
-    "shared":    os.path.expanduser("~/storage/shared"),
-    "downloads": os.path.expanduser("~/storage/downloads"),
-    "dcim":      os.path.expanduser("~/storage/dcim"),
+    "shared_nas": os.path.expanduser("~/storage/shared/shared_nas"),
 }
 
 def _nas_resolve(root_name: str, subpath: str):

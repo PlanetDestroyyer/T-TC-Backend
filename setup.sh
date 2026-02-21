@@ -2,6 +2,8 @@
 
 echo "Installing TinyCell Dependencies..."
 termux-setup-storage
+sleep 2  # wait for storage symlinks to be ready
+mkdir -p ~/storage/shared/shared_nas && echo "✅ Created shared_nas folder in phone storage" || echo "⚠️  Could not create shared_nas — grant storage permission and re-run setup"
 pkg update -y && pkg upgrade -y
 pkg install python git nodejs cloudflared termux-api openssl-tool -y
 
