@@ -603,6 +603,37 @@ async def _run_async(cmd: list[str], cwd: str = None, timeout: int = 120) -> str
     return stdout.decode()
 
 
+# Packages that require Rust/C compilation → pin to pure-Python alternatives.
+# pydantic-core (pydantic v2) is the most common culprit on Termux.
+_TERMUX_PINS: dict[str, str | None] = {
+    "pydantic-core": None,               # drop entirely — comes with pydantic v2, not needed when pinned to v1
+    "pydantic":      "pydantic==1.10.18", # v1 is pure Python; v2 requires pydantic-core (Rust)
+}
+
+
+def _patch_requirements(req_path: str):
+    """Rewrite requirements.txt to replace Rust-dependent packages with Termux-safe versions."""
+    with open(req_path) as f:
+        lines = f.readlines()
+    patched, changed = [], False
+    for line in lines:
+        pkg = re.split(r"[>=<!;\[\s]", line.strip().lower())[0]
+        if pkg in _TERMUX_PINS:
+            replacement = _TERMUX_PINS[pkg]
+            if replacement is None:
+                print(f"[DEPLOY] Dropping '{pkg}' (requires Rust — not available on Termux)")
+            else:
+                print(f"[DEPLOY] Pinning '{pkg}' → '{replacement}' (Termux-compatible)")
+                patched.append(replacement + "\n")
+            changed = True
+        else:
+            patched.append(line)
+    if changed:
+        shutil.copy2(req_path, req_path + ".orig")
+        with open(req_path, "w") as f:
+            f.writelines(patched)
+
+
 async def _install_deps(app_dir: str, app_type: str):
     if app_type in ("flask", "fastapi"):
         # Create a per-app isolated venv so packages never touch the global/TinyCell env
@@ -612,8 +643,9 @@ async def _install_deps(app_dir: str, app_type: str):
         venv_pip = os.path.join(venv_dir, "bin", "pip")
         req = os.path.join(app_dir, "requirements.txt")
         if os.path.exists(req):
+            _patch_requirements(req)
             await _run_async(
-                [venv_pip, "install", "--no-cache-dir", "-r", "requirements.txt"],
+                [venv_pip, "install", "--prefer-binary", "--no-cache-dir", "-r", "requirements.txt"],
                 cwd=app_dir, timeout=600,
             )
     elif app_type == "react":
