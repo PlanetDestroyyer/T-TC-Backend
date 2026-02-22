@@ -548,7 +548,7 @@ async def websocket_status(websocket: WebSocket):
 _NAS_URL_RE = deployer._URL_RE
 _NAS_TUNNEL_LOG = os.path.expanduser("~/.nas_tunnel.log")
 _NAS_CHUNKS_DIR = os.path.expanduser("~/.nas_chunks")
-_nas_state: dict = {"proc": None, "url": None}
+_nas_state: dict = {"proc": None, "url": None, "url_task": None}
 
 
 def _nas_tunnel_alive() -> bool:
@@ -590,15 +590,17 @@ async def _wait_nas_url():
         await asyncio.sleep(3)
         try:
             await asyncio.to_thread(_probe, url)
-            print(f"✅ NAS public URL is live: {url}")
-            _nas_state["url"] = url
+            if _nas_tunnel_alive():
+                print(f"✅ NAS public URL is live: {url}")
+                _nas_state["url"] = url
             return
         except Exception as e:
             print(f"⏳ Tunnel not ready yet (attempt {attempt + 1}/20): {e}")
 
-    # Fallback: publish URL even if probe never succeeded
-    print(f"⚠️ Tunnel probe timed out, publishing URL anyway: {url}")
-    _nas_state["url"] = url
+    # Fallback: publish URL even if probe never succeeded (only if proc still alive)
+    if _nas_tunnel_alive():
+        print(f"⚠️ Tunnel probe timed out, publishing URL anyway: {url}")
+        _nas_state["url"] = url
 
 
 @app.get("/nas/public/status")
@@ -624,12 +626,16 @@ async def nas_public_start():
         )
     _nas_state["proc"] = proc
     _nas_state["url"] = None
-    asyncio.create_task(_wait_nas_url())
+    _nas_state["url_task"] = asyncio.create_task(_wait_nas_url())
     return {"running": True, "url": None}
 
 
 @app.post("/nas/public/stop")
 def nas_public_stop():
+    task = _nas_state.get("url_task")
+    if task and not task.done():
+        task.cancel()
+    _nas_state["url_task"] = None
     proc = _nas_state.get("proc")
     if proc:
         proc.terminate()
