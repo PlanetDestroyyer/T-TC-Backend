@@ -557,17 +557,41 @@ def _nas_tunnel_alive() -> bool:
 
 
 async def _wait_nas_url():
+    import urllib.request as _urlreq
+
+    # Phase 1: wait for URL to appear in tunnel log (up to 40s)
+    url = None
     for _ in range(40):
         await asyncio.sleep(1)
         try:
             m = _NAS_URL_RE.search(open(_NAS_TUNNEL_LOG).read())
             if m:
-                _nas_state["url"] = m.group(0)
-                print(f"🌐 NAS public URL: {_nas_state['url']}")
-                return
+                url = m.group(0)
+                print(f"🌐 NAS tunnel URL found in log: {url} — verifying reachability…")
+                break
         except Exception:
             pass
-    print("⚠️ NAS tunnel URL not found within 40s")
+    if not url:
+        print("⚠️ NAS tunnel URL not found within 40s")
+        return
+
+    # Phase 2: probe the URL until it actually responds (up to 30s more)
+    def _probe(u):
+        _urlreq.urlopen(u, timeout=5)
+
+    for attempt in range(10):
+        await asyncio.sleep(3)
+        try:
+            await asyncio.to_thread(_probe, url)
+            print(f"✅ NAS public URL is live: {url}")
+            _nas_state["url"] = url
+            return
+        except Exception as e:
+            print(f"⏳ Tunnel not ready yet (attempt {attempt + 1}/10): {e}")
+
+    # Fallback: tunnel probing timed out, publish URL anyway
+    print(f"⚠️ Tunnel probe timed out, publishing URL anyway: {url}")
+    _nas_state["url"] = url
 
 
 @app.get("/nas/public/status")

@@ -713,20 +713,26 @@
       setTimeout(() => { qEl.innerHTML = ''; loadDir(); }, 1200);
     }
 
-    async function uploadFile(file, onProg) {
-      const dir = path.join('/');
-      const form = new FormData();
-      form.append('file', file, file.name);
-      const q = qs(dir ? { root: ROOT, path: dir } : { root: ROOT });
-      onProg(10);
-      const res = await fetch(`/nas/upload?${q}`, { method: 'POST', body: form });
-      onProg(90);
-      if (!res.ok) {
-        let msg = `HTTP ${res.status}`;
-        try { const j = await res.json(); msg = j.error || msg; } catch (_) {}
-        throw new Error(msg);
-      }
-      onProg(100);
+    function uploadFile(file, onProg) {
+      return new Promise((resolve, reject) => {
+        const dir = path.join('/');
+        const form = new FormData();
+        form.append('file', file, file.name);
+        const q = qs(dir ? { root: ROOT, path: dir } : { root: ROOT });
+        const xhr = new XMLHttpRequest();
+        xhr.upload.onprogress = e => { if (e.lengthComputable) onProg(e.loaded / e.total * 95); };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) { onProg(100); resolve(); }
+          else {
+            let msg = `HTTP ${xhr.status}`;
+            try { const j = JSON.parse(xhr.responseText); msg = j.error || msg; } catch (_) {}
+            reject(new Error(msg));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.open('POST', `/nas/upload?${q}`);
+        xhr.send(form);
+      });
     }
 
     // Large-file chunked upload (used for files > CHUNK bytes via uploadChunked if needed)
