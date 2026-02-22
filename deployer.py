@@ -648,11 +648,19 @@ async def _install_deps(app_dir: str, app_type: str):
         if not os.path.exists(venv_dir):
             await _run_async([sys.executable, "-m", "venv", venv_dir], timeout=60)
         venv_pip = os.path.join(venv_dir, "bin", "pip")
+        # Write a constraints file that pins pydantic to v1 for ALL packages
+        # (including transitive deps). This prevents fastapi → pydantic v2 →
+        # pydantic-core → maturin (Rust) chain even when pydantic isn't in requirements.txt.
+        constraints_path = os.path.join(app_dir, ".termux_constraints.txt")
+        with open(constraints_path, "w") as f:
+            f.write("pydantic==1.10.18\n")
+
         req = os.path.join(app_dir, "requirements.txt")
         if os.path.exists(req):
             _patch_requirements(req)
             await _run_async(
-                [venv_pip, "install", "--prefer-binary", "--no-cache-dir", "-r", "requirements.txt"],
+                [venv_pip, "install", "--prefer-binary", "--no-cache-dir",
+                 "-c", ".termux_constraints.txt", "-r", "requirements.txt"],
                 cwd=app_dir, timeout=600,
             )
     elif app_type == "react":
