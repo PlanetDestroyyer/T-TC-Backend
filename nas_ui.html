@@ -677,10 +677,11 @@
     // ── Upload ────────────────────────────────────────────────────────────────────
     async function handleFiles(files) {
       if (!files.length) return;
+      const fileArr = Array.from(files);            // snapshot BEFORE clearing — FileList is a live DOM object
       document.getElementById('file-input').value = '';
       const qEl = document.getElementById('upload-queue');
 
-      const list = Array.from(files).map(file => {
+      const list = fileArr.map(file => {
         const id = 'u' + Math.random().toString(36).slice(2);
         const html = `
       <div class="uitem" id="${id}">
