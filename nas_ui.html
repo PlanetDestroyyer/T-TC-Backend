@@ -700,7 +700,9 @@
         const barEl = document.getElementById(id + 'b');
         const pctEl = document.getElementById(id + 'p');
         try {
-          await uploadFile(file, pct => { barEl.style.width = pct + '%'; pctEl.textContent = Math.round(pct) + '%'; });
+          const CHUNK_THRESHOLD = 5 * 1024 * 1024;
+          const uploader = file.size > CHUNK_THRESHOLD ? uploadChunked : uploadFile;
+          await uploader(file, pct => { barEl.style.width = pct + '%'; pctEl.textContent = Math.round(pct) + '%'; });
           document.getElementById(id)?.classList.add('done');
           pctEl.textContent = '✓';
           toast(`✓ ${file.name} uploaded`, 'ok');

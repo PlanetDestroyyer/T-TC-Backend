@@ -93,13 +93,14 @@ def get_device_ip():
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except:
+    except Exception:
         return "unknown"
 
 # ─── Thermal Management ───────────────────────────────────────────────────────
 
-TEMP_WARM     = 43   # Warn user
-TEMP_HOT      = 46   # Heavy warn + block deploys
+TEMP_MILD     = 40   # Inform user (warm level)
+TEMP_WARM     = 43   # Warn user (hot level)
+TEMP_HOT      = 46   # Heavy warn + block deploys (critical level)
 TEMP_CRITICAL = 50   # Emergency: kill all apps
 
 # Shared with deployer — populated when apps are deployed/started
@@ -349,7 +350,7 @@ def get_thermal():
         "temperature": temp,
         "level": level,              # normal | warm | hot | critical | emergency
         "thresholds": {
-            "warm": 40,
+            "warm": TEMP_MILD,
             "hot": TEMP_WARM,
             "critical": TEMP_HOT,
             "emergency": TEMP_CRITICAL,
@@ -543,9 +544,8 @@ async def websocket_status(websocket: WebSocket):
 
 # ─── NAS Public Server (Cloudflare Tunnel) ───────────────────────────────────
 
-import re as _re
-
-_NAS_URL_RE = _re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+# Reuse the same regex from deployer — single source of truth
+_NAS_URL_RE = deployer._URL_RE
 _NAS_TUNNEL_LOG = os.path.expanduser("~/.nas_tunnel.log")
 _NAS_CHUNKS_DIR = os.path.expanduser("~/.nas_chunks")
 _nas_state: dict = {"proc": None, "url": None}
@@ -564,7 +564,9 @@ async def _wait_nas_url():
     for _ in range(40):
         await asyncio.sleep(1)
         try:
-            m = _NAS_URL_RE.search(open(_NAS_TUNNEL_LOG).read())
+            with open(_NAS_TUNNEL_LOG) as f:
+                content = f.read()
+            m = _NAS_URL_RE.search(content)
             if m:
                 url = m.group(0)
                 print(f"🌐 NAS tunnel URL found in log: {url} — verifying reachability…")
@@ -575,11 +577,16 @@ async def _wait_nas_url():
         print("⚠️ NAS tunnel URL not found within 40s")
         return
 
-    # Phase 2: probe the URL until it actually responds (up to 30s more)
-    def _probe(u):
-        _urlreq.urlopen(u, timeout=5)
+    # Phase 2: probe until tunnel actually forwards traffic (up to 60s more)
+    import urllib.error as _urlerr
 
-    for attempt in range(10):
+    def _probe(u):
+        try:
+            _urlreq.urlopen(u + "/status", timeout=8)
+        except _urlerr.HTTPError:
+            pass  # any HTTP response (even 4xx) means tunnel is forwarding — treat as reachable
+
+    for attempt in range(20):
         await asyncio.sleep(3)
         try:
             await asyncio.to_thread(_probe, url)
@@ -587,9 +594,9 @@ async def _wait_nas_url():
             _nas_state["url"] = url
             return
         except Exception as e:
-            print(f"⏳ Tunnel not ready yet (attempt {attempt + 1}/10): {e}")
+            print(f"⏳ Tunnel not ready yet (attempt {attempt + 1}/20): {e}")
 
-    # Fallback: tunnel probing timed out, publish URL anyway
+    # Fallback: publish URL even if probe never succeeded
     print(f"⚠️ Tunnel probe timed out, publishing URL anyway: {url}")
     _nas_state["url"] = url
 
@@ -810,7 +817,7 @@ async def nas_upload(
         print(f"[NAS] Upload failed: target is not a directory: {target_dir!r}")
         return JSONResponse(status_code=400, content={"error": "Not a directory"})
 
-    dest = os.path.join(target_dir, file.filename or "upload")
+    dest = os.path.join(target_dir, os.path.basename(file.filename or "upload"))
     try:
         with open(dest, "wb") as f:
             while True:

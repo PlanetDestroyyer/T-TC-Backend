@@ -515,7 +515,8 @@ def _detect_type(app_dir: str) -> str:
             return "react"
     req = os.path.join(app_dir, "requirements.txt")
     if os.path.exists(req):
-        content = open(req).read().lower()
+        with open(req) as f:
+            content = f.read().lower()
         if "fastapi" in content:
             return "fastapi"
         if "flask" in content:
@@ -565,7 +566,8 @@ async def _wait_for_tunnel_url(app_id: str, timeout: int = 30) -> str:
     for _ in range(timeout):
         await asyncio.sleep(1)
         try:
-            m = _URL_RE.search(open(log).read())
+            with open(log) as f:
+                m = _URL_RE.search(f.read())
             if m:
                 return m.group(0)
         except FileNotFoundError:
@@ -618,6 +620,9 @@ def _patch_requirements(req_path: str):
     patched, changed = [], False
     for line in lines:
         pkg = re.split(r"[>=<!;\[\s]", line.strip().lower())[0]
+        if not pkg or pkg.startswith("#"):  # skip blanks and comments
+            patched.append(line)
+            continue
         if pkg in _TERMUX_PINS:
             replacement = _TERMUX_PINS[pkg]
             if replacement is None:
