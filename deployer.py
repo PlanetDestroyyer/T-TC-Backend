@@ -605,11 +605,13 @@ async def _run_async(cmd: list[str], cwd: str = None, timeout: int = 120) -> str
     return stdout.decode()
 
 
-# Packages that require Rust/C compilation → pin to pure-Python alternatives.
-# pydantic-core (pydantic v2) is the most common culprit on Termux.
+# Packages that require Rust/C compilation → pin to pure-Python/pre-built alternatives.
+# Uses the same versions as the main TinyCell backend (known-good on Termux Python 3.12).
 _TERMUX_PINS: dict[str, str | None] = {
-    "pydantic-core": None,               # drop entirely — comes with pydantic v2, not needed when pinned to v1
-    "pydantic":      "pydantic==1.10.18", # v1 is pure Python; v2 requires pydantic-core (Rust)
+    "pydantic-core": None,               # drop — pulled in by pydantic v2, needs Rust
+    "pydantic":      "pydantic==1.10.18", # v1 is pure Python
+    "fastapi":       "fastapi==0.110.0",  # same as main backend; works with pydantic v1
+    "uvicorn":       "uvicorn==0.27.1",   # same as main backend
 }
 
 
