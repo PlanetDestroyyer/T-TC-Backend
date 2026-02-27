@@ -559,25 +559,70 @@ async def websocket_status(websocket: WebSocket):
         import traceback
         traceback.print_exc()
 
-# ─── NAS Public Server (SSH Tunnel via localhost.run) ────────────────────────
+# ─── NAS Public Server (SSH Tunnel — multi-provider with auto-reconnect) ──────
 #
-# Why SSH instead of cloudflared:
-#   cloudflared is a Go binary — Go's runtime uses Linux syscalls (clone3,
-#   getrandom) that proot doesn't implement → ENOSYS when run inside Alpine.
-#   Running cloudflared natively (outside proot) fails because Android restricts
-#   native subprocess DNS to [::1]:53 which is a stub resolver inaccessible
-#   from non-app processes (SELinux).
+# Provider priority:
+#   1. pinggy.io   — 60 min free sessions, faster, more reliable
+#   2. localhost.run — 8 min sessions (auto-reconnect handles expiry)
+#   3. serveo.net  — backup
 #
-#   SSH (openssh-client) is a musl-linked C binary from Alpine packages.
-#   It runs inside Alpine proot where DNS is properly configured via the host
-#   network. localhost.run provides free SSH reverse tunnels — no account needed.
-#
-# localhost.run URL format: https://<hash>.lhr.life
+# Auto-reconnect: a background task watches the SSH process and restarts
+# it automatically when the session expires or disconnects. The frontend
+# polls /nas/public/status and gets the new URL automatically.
 
-_NAS_URL_RE   = re.compile(r"https://[a-z0-9-]+\.lhr\.life")
+_NAS_PROVIDERS = [
+    {
+        "name": "pinggy.io",
+        "cmd": ["ssh", "-p", "443",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+                "-T", "-n",
+                "-R", "0:localhost:8000",
+                "a.pinggy.io"],
+        "url_re": re.compile(r"https://[a-z0-9-]+\.a\.pinggy\.io"),
+    },
+    {
+        "name": "localhost.run",
+        "cmd": ["ssh",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+                "-T", "-n",
+                "-R", "80:localhost:8000",
+                "nokey@localhost.run"],
+        "url_re": re.compile(r"https://[a-z0-9-]+\.lhr\.life"),
+    },
+    {
+        "name": "serveo.net",
+        "cmd": ["ssh",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+                "-T", "-n",
+                "-R", "80:localhost:8000",
+                "serveo.net"],
+        "url_re": re.compile(r"https://[a-z0-9-]+\.serveo\.net"),
+    },
+]
+
+# Combined regex for fast URL detection regardless of provider
+_NAS_URL_RE = re.compile(
+    r"https://[a-z0-9-]+\.(a\.pinggy\.io|lhr\.life|serveo\.net)"
+)
 _NAS_TUNNEL_LOG = os.path.expanduser("~/.nas_tunnel.log")
 _NAS_CHUNKS_DIR = os.path.expanduser("~/.nas_chunks")
-_nas_state: dict = {"proc": None, "url": None, "url_task": None}
+_nas_state: dict = {
+    "proc": None,
+    "url": None,
+    "url_task": None,
+    "monitor_task": None,
+    "enabled": False,        # True while user wants tunnel running
+    "provider_idx": 0,       # Which provider we last used successfully
+}
 
 
 def _nas_tunnel_alive() -> bool:
@@ -585,46 +630,103 @@ def _nas_tunnel_alive() -> bool:
     return bool(proc and proc.poll() is None)
 
 
-async def _wait_nas_url():
-    """Read SSH stdout line by line until we see the localhost.run URL."""
-    proc = _nas_state.get("proc")
-    if not proc or proc.stdout is None:
-        return
+def _start_tunnel_proc(provider: dict) -> subprocess.Popen:
+    """Launch the SSH subprocess for the given provider config."""
+    os.makedirs(os.path.expanduser("~/.ssh"), mode=0o700, exist_ok=True)
+    return subprocess.Popen(
+        provider["cmd"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        text=True,
+    )
 
-    url = None
+
+async def _read_tunnel_url(proc: subprocess.Popen, url_re: re.Pattern) -> str | None:
+    """Read SSH stdout until we get a URL or process dies."""
     loop = asyncio.get_event_loop()
 
     def _read():
         try:
             for line in proc.stdout:
-                print(f"[ssh] {line.rstrip()}")
-                m = _NAS_URL_RE.search(line)
+                print(f"[tunnel] {line.rstrip()}")
+                m = url_re.search(line)
                 if m:
                     return m.group(0)
         except Exception as e:
-            print(f"[ssh] read error: {e}")
+            print(f"[tunnel] read error: {e}")
         return None
 
-    # Run blocking readline in a thread
-    url = await loop.run_in_executor(None, _read)
-    if url:
-        print(f"✅ NAS tunnel URL: {url}")
-        _nas_state["url"] = url
-    else:
-        print("⚠️ NAS tunnel ended without providing a URL")
+    return await loop.run_in_executor(None, _read)
+
+
+async def _tunnel_monitor():
+    """
+    Background task: keep the tunnel alive as long as _nas_state['enabled'].
+    Tries providers in order; on failure rotates to the next one.
+    Auto-reconnects seamlessly — frontend just polls /nas/public/status.
+    """
+    provider_count = len(_NAS_PROVIDERS)
+    fail_streak = 0
+
+    while _nas_state.get("enabled"):
+        idx = _nas_state.get("provider_idx", 0) % provider_count
+        provider = _NAS_PROVIDERS[idx]
+        print(f"🔌 Starting tunnel via {provider['name']}…")
+
+        try:
+            proc = _start_tunnel_proc(provider)
+            _nas_state["proc"] = proc
+            _nas_state["url"] = None
+
+            url = await _read_tunnel_url(proc, provider["url_re"])
+            if url:
+                print(f"✅ Tunnel URL ({provider['name']}): {url}")
+                _nas_state["url"] = url
+                fail_streak = 0
+                # Wait for process to exit (session expiry / network drop)
+                await asyncio.get_event_loop().run_in_executor(None, proc.wait)
+                print(f"⚠️ Tunnel via {provider['name']} ended — reconnecting…")
+            else:
+                print(f"⚠️ {provider['name']} gave no URL — trying next provider")
+                proc.terminate()
+                fail_streak += 1
+                # Rotate to next provider after 2 consecutive failures on current
+                if fail_streak >= 2:
+                    _nas_state["provider_idx"] = (idx + 1) % provider_count
+                    fail_streak = 0
+                    print(f"🔄 Switching to {_NAS_PROVIDERS[_nas_state['provider_idx']]['name']}")
+
+        except Exception as e:
+            print(f"[tunnel] error with {provider['name']}: {e}")
+            fail_streak += 1
+            if fail_streak >= 2:
+                _nas_state["provider_idx"] = (idx + 1) % provider_count
+                fail_streak = 0
+
+        if _nas_state.get("enabled"):
+            print("⏳ Reconnecting in 3s…")
+            await asyncio.sleep(3)
+
+    print("🔒 Tunnel monitor stopped")
+    _nas_state["proc"] = None
+    _nas_state["url"] = None
 
 
 @app.get("/nas/public/status")
 def nas_public_status():
     alive = _nas_tunnel_alive()
-    if not alive:
+    if not alive and not _nas_state.get("enabled"):
         _nas_state["url"] = None
-    return {"running": alive, "url": _nas_state.get("url")}
+    return {
+        "running": _nas_state.get("enabled", False),
+        "url": _nas_state.get("url"),
+    }
 
 
 @app.post("/nas/public/start")
 async def nas_public_start():
-    if _nas_tunnel_alive():
+    if _nas_state.get("enabled"):
         return {"running": True, "url": _nas_state.get("url")}
 
     # Ensure openssh-client is available (auto-install if missing)
@@ -636,52 +738,29 @@ async def nas_public_start():
         except Exception as e:
             return JSONResponse(status_code=503, content={
                 "running": False, "url": None,
-                "error": f"openssh-client not available and auto-install failed: {e}",
-            })
-        if not _shutil.which("ssh"):
-            return JSONResponse(status_code=503, content={
-                "running": False, "url": None,
-                "error": "openssh-client not found. Clear app data and re-run setup.",
+                "error": f"openssh-client not available: {e}",
             })
 
-    # Ensure ~/.ssh exists (prevents SSH config warnings inside proot)
-    os.makedirs(os.path.expanduser("~/.ssh"), mode=0o700, exist_ok=True)
-
-    try:
-        proc = subprocess.Popen(
-            [
-                "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "ServerAliveInterval=30",
-                "-o", "ExitOnForwardFailure=yes",
-                "-T",              # no TTY
-                "-n",              # redirect stdin from /dev/null
-                "-R", "80:localhost:8000",
-                "nokey@localhost.run",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            text=True,
-        )
-    except Exception as e:
-        return JSONResponse(status_code=500,
-                            content={"running": False, "url": None, "error": str(e)})
-
-    _nas_state["proc"] = proc
-    _nas_state["url"] = None
-    _nas_state["url_task"] = asyncio.create_task(_wait_nas_url())
+    _nas_state["enabled"] = True
+    _nas_state["provider_idx"] = 0  # start with pinggy.io
+    # Cancel any existing monitor
+    old = _nas_state.get("monitor_task")
+    if old and not old.done():
+        old.cancel()
+    _nas_state["monitor_task"] = asyncio.create_task(_tunnel_monitor())
     return {"running": True, "url": None}
-
 
 
 @app.post("/nas/public/stop")
 def nas_public_stop():
-    task = _nas_state.get("url_task")
+    _nas_state["enabled"] = False
+    task = _nas_state.get("monitor_task")
     if task and not task.done():
         task.cancel()
-    _nas_state["url_task"] = None
+    _nas_state["monitor_task"] = None
+    old_url_task = _nas_state.get("url_task")
+    if old_url_task and not old_url_task.done():
+        old_url_task.cancel()
     proc = _nas_state.get("proc")
     if proc:
         proc.terminate()
