@@ -594,10 +594,20 @@ async def _setup_tunnel(app_id: str, port: int) -> str:
 
 
 async def _run_async(cmd: list[str], cwd: str = None, timeout: int = 120) -> str:
+    env = None
+    if cmd and cmd[0] == "git":
+        # GIT_CONFIG_NOSYSTEM=1: skip /etc/gitconfig which can cause ENOSYS in proot.
+        # Also pre-create ~/.config/git/ so git doesn't stat a missing dir (also ENOSYS).
+        import os as _os
+        _git_cfg_dir = _os.path.expanduser("~/.config/git")
+        _os.makedirs(_git_cfg_dir, exist_ok=True)
+        open(_os.path.join(_git_cfg_dir, "config"), "a").close()  # ensure file exists
+        env = {**_os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
     proc = await asyncio.create_subprocess_exec(
         *cmd, cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     if proc.returncode != 0:
