@@ -269,8 +269,24 @@ def get_system_stats():
         except Exception:
             pass
 
+    # Method 4: /proc/batt_id or similar Android proc paths (some proot envs)
     if not battery_info:
-        battery_info = {"percentage": 0, "plugged": False, "status": "unavailable"}
+        try:
+            for proc_path in ["/proc/batt_id", "/proc/battery"]:
+                if os.path.exists(proc_path):
+                    raw = open(proc_path).read().strip()
+                    if raw.isdigit():
+                        battery_info = {
+                            "percentage": int(raw),
+                            "plugged": False,
+                            "status": "unknown",
+                        }
+                        break
+        except Exception:
+            pass
+
+    if not battery_info:
+        battery_info = {"percentage": -1, "plugged": False, "status": "unavailable"}
 
     # Memory info with fallback
     try:
@@ -619,10 +635,25 @@ async def nas_public_start():
         open(_NAS_TUNNEL_LOG, "w").close()
     except Exception:
         pass
-    with open(_NAS_TUNNEL_LOG, "w") as lf:
-        proc = subprocess.Popen(
-            ["cloudflared", "tunnel", "--url", "http://localhost:8000"],
-            stdout=lf, stderr=subprocess.STDOUT,
+    try:
+        with open(_NAS_TUNNEL_LOG, "w") as lf:
+            proc = subprocess.Popen(
+                ["cloudflared", "tunnel", "--url", "http://localhost:8000"],
+                stdout=lf, stderr=subprocess.STDOUT,
+            )
+    except FileNotFoundError:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "running": False,
+                "url": None,
+                "error": "cloudflared not installed. Run: apk add cloudflared (or install manually)",
+            },
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"running": False, "url": None, "error": str(e)},
         )
     _nas_state["proc"] = proc
     _nas_state["url"] = None
