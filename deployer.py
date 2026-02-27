@@ -489,6 +489,15 @@ def restore_on_startup():
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
+def _wrap_cwd(cmd: list[str], cwd: str) -> list[str]:
+    """Wraps commands in a python script that calls os.chdir() before os.execvp().
+    This bypasses Python's subprocess 'cwd=' which uses the fchdir() syscall (unhandled by PRoot)."""
+    import json
+    cmd_json = json.dumps(cmd)
+    cwd_json = json.dumps(cwd)
+    code = f"import os, sys; os.chdir({cwd_json}); os.execvp({cmd_json}[0], {cmd_json})"
+    return [sys.executable, "-c", code]
+
 def _is_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -548,8 +557,12 @@ def _launch_app(app: dict) -> subprocess.Popen | None:
     else:
         return None
     log = os.path.join(d, "app.log")
+    
+    # Avoid PRoot fchdir bug by wrapping instead of passing cwd=d
+    wrapped_cmd = _wrap_cwd(cmd, d)
+    
     with open(log, "a") as lf:
-        return subprocess.Popen(cmd, cwd=d, stdout=lf, stderr=lf, env=env)
+        return subprocess.Popen(wrapped_cmd, cwd=None, stdout=lf, stderr=lf, env=env)
 
 
 def _start_tunnel_process(app_id: str, port: int) -> subprocess.Popen:
@@ -607,8 +620,12 @@ async def _run_async(cmd: list[str], cwd: str = None, timeout: int = 120) -> str
         # CWD (ENOSYS). Always provide an explicit cwd so git starts in a known path.
         if cwd is None:
             cwd = "/"
+            
+    if cwd is not None:
+        cmd = _wrap_cwd(cmd, cwd)
+        
     proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=cwd,
+        *cmd, cwd=None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
