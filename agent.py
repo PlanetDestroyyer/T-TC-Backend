@@ -558,10 +558,22 @@ async def websocket_status(websocket: WebSocket):
         import traceback
         traceback.print_exc()
 
-# ─── NAS Public Server (Cloudflare Tunnel) ───────────────────────────────────
+# ─── NAS Public Server (SSH Tunnel via localhost.run) ────────────────────────
+#
+# Why SSH instead of cloudflared:
+#   cloudflared is a Go binary — Go's runtime uses Linux syscalls (clone3,
+#   getrandom) that proot doesn't implement → ENOSYS when run inside Alpine.
+#   Running cloudflared natively (outside proot) fails because Android restricts
+#   native subprocess DNS to [::1]:53 which is a stub resolver inaccessible
+#   from non-app processes (SELinux).
+#
+#   SSH (openssh-client) is a musl-linked C binary from Alpine packages.
+#   It runs inside Alpine proot where DNS is properly configured via the host
+#   network. localhost.run provides free SSH reverse tunnels — no account needed.
+#
+# localhost.run URL format: https://<hash>.lhr.life
 
-# Reuse the same regex from deployer — single source of truth
-_NAS_URL_RE = deployer._URL_RE
+_NAS_URL_RE   = re.compile(r"https://[a-z0-9-]+\.lhr\.life")
 _NAS_TUNNEL_LOG = os.path.expanduser("~/.nas_tunnel.log")
 _NAS_CHUNKS_DIR = os.path.expanduser("~/.nas_chunks")
 _nas_state: dict = {"proc": None, "url": None, "url_task": None}
@@ -573,50 +585,32 @@ def _nas_tunnel_alive() -> bool:
 
 
 async def _wait_nas_url():
-    import urllib.request as _urlreq
-
-    # Phase 1: wait for URL to appear in tunnel log (up to 40s)
-    url = None
-    for _ in range(40):
-        await asyncio.sleep(1)
-        try:
-            with open(_NAS_TUNNEL_LOG) as f:
-                content = f.read()
-            m = _NAS_URL_RE.search(content)
-            if m:
-                url = m.group(0)
-                print(f"🌐 NAS tunnel URL found in log: {url} — verifying reachability…")
-                break
-        except Exception:
-            pass
-    if not url:
-        print("⚠️ NAS tunnel URL not found within 40s")
+    """Read SSH stdout line by line until we see the localhost.run URL."""
+    proc = _nas_state.get("proc")
+    if not proc or proc.stdout is None:
         return
 
-    # Phase 2: probe until tunnel actually forwards traffic (up to 60s more)
-    import urllib.error as _urlerr
+    url = None
+    loop = asyncio.get_event_loop()
 
-    def _probe(u):
+    def _read():
         try:
-            _urlreq.urlopen(u + "/status", timeout=8)
-        except _urlerr.HTTPError:
-            pass  # any HTTP response (even 4xx) means tunnel is forwarding — treat as reachable
-
-    for attempt in range(20):
-        await asyncio.sleep(3)
-        try:
-            await asyncio.to_thread(_probe, url)
-            if _nas_tunnel_alive():
-                print(f"✅ NAS public URL is live: {url}")
-                _nas_state["url"] = url
-            return
+            for line in proc.stdout:
+                print(f"[ssh] {line.rstrip()}")
+                m = _NAS_URL_RE.search(line)
+                if m:
+                    return m.group(0)
         except Exception as e:
-            print(f"⏳ Tunnel not ready yet (attempt {attempt + 1}/20): {e}")
+            print(f"[ssh] read error: {e}")
+        return None
 
-    # Fallback: publish URL even if probe never succeeded (only if proc still alive)
-    if _nas_tunnel_alive():
-        print(f"⚠️ Tunnel probe timed out, publishing URL anyway: {url}")
+    # Run blocking readline in a thread
+    url = await loop.run_in_executor(None, _read)
+    if url:
+        print(f"✅ NAS tunnel URL: {url}")
         _nas_state["url"] = url
+    else:
+        print("⚠️ NAS tunnel ended without providing a URL")
 
 
 @app.get("/nas/public/status")
@@ -631,34 +625,54 @@ def nas_public_status():
 async def nas_public_start():
     if _nas_tunnel_alive():
         return {"running": True, "url": _nas_state.get("url")}
+
+    # Ensure openssh-client is available (auto-install if missing)
+    import shutil as _shutil
+    if not _shutil.which("ssh"):
+        try:
+            subprocess.run(["apk", "add", "--no-cache", "openssh-client"],
+                           check=True, capture_output=True, timeout=60)
+        except Exception as e:
+            return JSONResponse(status_code=503, content={
+                "running": False, "url": None,
+                "error": f"openssh-client not available and auto-install failed: {e}",
+            })
+        if not _shutil.which("ssh"):
+            return JSONResponse(status_code=503, content={
+                "running": False, "url": None,
+                "error": "openssh-client not found. Clear app data and re-run setup.",
+            })
+
+    # Ensure ~/.ssh exists (prevents SSH config warnings inside proot)
+    os.makedirs(os.path.expanduser("~/.ssh"), mode=0o700, exist_ok=True)
+
     try:
-        open(_NAS_TUNNEL_LOG, "w").close()
-    except Exception:
-        pass
-    try:
-        with open(_NAS_TUNNEL_LOG, "w") as lf:
-            proc = subprocess.Popen(
-                ["cloudflared", "tunnel", "--url", "http://localhost:8000"],
-                stdout=lf, stderr=subprocess.STDOUT,
-            )
-    except FileNotFoundError:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "running": False,
-                "url": None,
-                "error": "cloudflared not installed. Run: apk add cloudflared (or install manually)",
-            },
+        proc = subprocess.Popen(
+            [
+                "ssh",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ExitOnForwardFailure=yes",
+                "-T",              # no TTY
+                "-n",              # redirect stdin from /dev/null
+                "-R", "80:localhost:8000",
+                "nokey@localhost.run",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True,
         )
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"running": False, "url": None, "error": str(e)},
-        )
+        return JSONResponse(status_code=500,
+                            content={"running": False, "url": None, "error": str(e)})
+
     _nas_state["proc"] = proc
     _nas_state["url"] = None
     _nas_state["url_task"] = asyncio.create_task(_wait_nas_url())
     return {"running": True, "url": None}
+
 
 
 @app.post("/nas/public/stop")
