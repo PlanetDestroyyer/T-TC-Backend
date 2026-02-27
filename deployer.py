@@ -606,7 +606,7 @@ async def _run_async(cmd: list[str], cwd: str = None, timeout: int = 120) -> str
         # git calls getcwd() at startup; proot fails to reverse-translate an inherited
         # CWD (ENOSYS). Always provide an explicit cwd so git starts in a known path.
         if cwd is None:
-            cwd = "/root"
+            cwd = "/"
     proc = await asyncio.create_subprocess_exec(
         *cmd, cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
