@@ -548,7 +548,7 @@
   <input type="file" id="file-input" multiple onchange="handleFiles(this.files)">
 
   <script>
-    const CHUNK = 50 * 1024 * 1024;
+    const CHUNK = 5 * 1024 * 1024; // 5MB to prevent Cloudflare 100s timeout (HTTP 524)
     const ROOT = 'shared_nas'; // single dedicated NAS folder — ~/storage/shared/shared_nas
     let path = [];       // current folder segments
     let delTarget = null;
@@ -728,7 +728,7 @@
           if (xhr.status >= 200 && xhr.status < 300) { onProg(100); resolve(); }
           else {
             let msg = `HTTP ${xhr.status}`;
-            try { const j = JSON.parse(xhr.responseText); msg = j.error || msg; } catch (_) {}
+            try { const j = JSON.parse(xhr.responseText); msg = j.error || msg; } catch (_) { }
             reject(new Error(msg));
           }
         };
@@ -738,21 +738,58 @@
       });
     }
 
-    // Large-file chunked upload (used for files > CHUNK bytes via uploadChunked if needed)
+    // Large-file chunked upload with ADAPTIVE chunking (target: 75 seconds, 4MB - 25MB)
     async function uploadChunked(file, onProg) {
-      const total = Math.max(1, Math.ceil(file.size / CHUNK));
+      const TARGET_TIME_S = 75;
+      const MIN_CHUNK = 4 * 1024 * 1024;
+      const MAX_CHUNK = 25 * 1024 * 1024;
+      let currentChunkSize = 8 * 1024 * 1024; // Start with 8 MB
+
       const dir = path.join('/');
-      for (let i = 0; i < total; i++) {
-        const chunk = file.slice(i * CHUNK, (i + 1) * CHUNK);
-        const form = new FormData(); form.append('file', chunk, file.name);
-        const q = qs({ root: ROOT, path: dir, filename: file.name, chunk_index: i, total_chunks: total });
+      let offset = 0;
+      let chunkIndex = 0;
+
+      while (offset < file.size) {
+        // Clamp the slice to file size
+        const bytesRemaining = file.size - offset;
+        const sendBytes = Math.min(bytesRemaining, currentChunkSize);
+        const chunk = file.slice(offset, offset + sendBytes);
+        const isLast = (offset + sendBytes) >= file.size;
+
+        const form = new FormData();
+        form.append('file', chunk, file.name);
+
+        // No longer relying on total_chunks, we use is_last to assemble
+        const q = qs({
+          root: ROOT,
+          path: dir,
+          filename: file.name,
+          chunk_index: chunkIndex,
+          is_last: isLast
+        });
+
+        const startTime = performance.now();
         const res = await fetch(`/nas/upload-chunk?${q}`, { method: 'POST', body: form });
+        const endTime = performance.now();
+
         if (!res.ok) {
-          let msg = `chunk ${i} HTTP ${res.status}`;
-          try { const j = await res.json(); msg = j.error || msg; } catch (_) {}
+          let msg = `chunk ${chunkIndex} HTTP ${res.status}`;
+          try { const j = await res.json(); msg = j.error || msg; } catch (_) { }
           throw new Error(msg);
         }
-        onProg((i + 1) / total * 100);
+
+        offset += sendBytes;
+        chunkIndex++;
+        onProg((offset / file.size) * 100);
+
+        if (!isLast) {
+          // Adaptive logic
+          const durationS = (endTime - startTime) / 1000;
+          let newChunkSize = Math.floor(currentChunkSize * (TARGET_TIME_S / durationS));
+
+          // Clamp between 4 MB and 25 MB
+          currentChunkSize = Math.max(MIN_CHUNK, Math.min(MAX_CHUNK, newChunkSize));
+        }
       }
     }
 

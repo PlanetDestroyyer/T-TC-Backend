@@ -783,16 +783,16 @@ async def nas_upload_chunk(
     path: str = Query(default=""),
     filename: str = Query(...),
     chunk_index: int = Query(...),
-    total_chunks: int = Query(...),
+    is_last: bool = Query(default=False),
     file: UploadFile = File(...),
 ):
-    """Receive one chunk of a large file. Assembles automatically when all chunks arrive."""
+    """Receive one chunk of a large file. Assembles automatically when is_last is True."""
     safe_name = os.path.basename(filename)
     if not safe_name:
         print(f"[NAS-CHUNK] Rejected: empty filename")
         return JSONResponse(status_code=400, content={"error": "Invalid filename"})
 
-    print(f"[NAS-CHUNK] Chunk {chunk_index+1}/{total_chunks} for {safe_name!r} (root={root!r} path={path!r})")
+    print(f"[NAS-CHUNK] Chunk {chunk_index} for {safe_name!r} (root={root!r} path={path!r} is_last={is_last})")
     chunk_dir = os.path.join(_NAS_CHUNKS_DIR, safe_name)
     os.makedirs(chunk_dir, exist_ok=True)
 
@@ -805,7 +805,7 @@ async def nas_upload_chunk(
             f.write(data)
 
     received = len(os.listdir(chunk_dir))
-    if received >= total_chunks:
+    if is_last:
         _, target_dir = _nas_resolve(root, path)
         if target_dir is None:
             shutil.rmtree(chunk_dir, ignore_errors=True)
@@ -813,12 +813,17 @@ async def nas_upload_chunk(
             return JSONResponse(status_code=403, content={"error": "Access denied"})
         os.makedirs(target_dir, exist_ok=True)
         dest = os.path.join(target_dir, safe_name)
-        print(f"[NAS-CHUNK] Assembling {total_chunks} chunks → {dest!r}")
+        print(f"[NAS-CHUNK] Assembling {received} chunks → {dest!r}")
         try:
             with open(dest, "wb") as out:
-                for i in range(total_chunks):
-                    with open(os.path.join(chunk_dir, f"{i:06d}"), "rb") as cf:
-                        shutil.copyfileobj(cf, out)
+                # The frontend uploaded chunks starting sequentially from 0
+                for i in range(chunk_index + 1):
+                    chunk_file = os.path.join(chunk_dir, f"{i:06d}")
+                    if os.path.exists(chunk_file):
+                        with open(chunk_file, "rb") as cf:
+                            shutil.copyfileobj(cf, out)
+                    else:
+                        print(f"[NAS-CHUNK] Warning: missing chunk {i}")
             shutil.rmtree(chunk_dir, ignore_errors=True)
             size = os.path.getsize(dest)
             print(f"[NAS-CHUNK] Upload complete: {dest!r} ({size} bytes)")
@@ -828,7 +833,7 @@ async def nas_upload_chunk(
             print(f"[NAS-CHUNK] Assembly error: {e!r}")
             return JSONResponse(status_code=500, content={"error": str(e)})
 
-    return {"status": "chunk_received", "received": received, "total": total_chunks}
+    return {"status": "chunk_received", "received": received, "current_chunk": chunk_index}
 
 
 # ─── NAS File Browser ─────────────────────────────────────────────────────────
