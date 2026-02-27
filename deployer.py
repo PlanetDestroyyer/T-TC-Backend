@@ -603,6 +603,10 @@ async def _run_async(cmd: list[str], cwd: str = None, timeout: int = 120) -> str
         _os.makedirs(_git_cfg_dir, exist_ok=True)
         open(_os.path.join(_git_cfg_dir, "config"), "a").close()  # ensure file exists
         env = {**_os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
+        # git calls getcwd() at startup; proot fails to reverse-translate an inherited
+        # CWD (ENOSYS). Always provide an explicit cwd so git starts in a known path.
+        if cwd is None:
+            cwd = "/root"
     proc = await asyncio.create_subprocess_exec(
         *cmd, cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
@@ -613,6 +617,7 @@ async def _run_async(cmd: list[str], cwd: str = None, timeout: int = 120) -> str
     if proc.returncode != 0:
         raise RuntimeError(stderr.decode().strip() or "Command failed")
     return stdout.decode()
+
 
 
 # Packages that require Rust/C compilation → pin to pure-Python/pre-built alternatives.
