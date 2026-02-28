@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -359,7 +360,8 @@ async def _probe_tunnel(url: str) -> bool:
     """Return True if the tunnel URL responds with any HTTP status."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "curl", "-sf", "--max-time", "8", "-o", "/dev/null", url,
+            "/bin/busybox", "sh", "-c",
+            f"cd /root && curl -sf --max-time 8 -o /dev/null {shlex.quote(url)}",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -539,16 +541,21 @@ def _launch_app(app: dict) -> subprocess.Popen | None:
         return None
 
     log = os.path.join(d, "app.log")
+    # Wrap in busybox sh so proot's chdir() fires before the app calls getcwd()
+    shell_cmd = f"cd /root && {shlex.join(cmd)}"
     with open(log, "a") as lf:
-        # No cwd= — all paths are absolute so the process never needs to chdir
-        return subprocess.Popen(cmd, stdout=lf, stderr=lf, env=env)
+        return subprocess.Popen(
+            ["/bin/busybox", "sh", "-c", shell_cmd],
+            stdout=lf, stderr=lf, env=env,
+        )
 
 
 def _start_tunnel_process(app_id: str, port: int) -> subprocess.Popen:
     log = os.path.join(APPS_DIR, app_id, "tunnel.log")
     with open(log, "w") as f:
         return subprocess.Popen(
-            ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
+            ["/bin/busybox", "sh", "-c",
+             f"cd /root && cloudflared tunnel --url http://localhost:{port}"],
             stdout=f, stderr=subprocess.STDOUT,
         )
 
@@ -650,24 +657,23 @@ async def _update_repo(repo_url: str, dest_dir: str):
 async def _run_async(cmd: list[str], timeout: int = 120) -> str:
     """Run a command asynchronously inside the proot Alpine environment.
 
-    CWD note: do NOT pass cwd= here. The proot session was started with --cwd=/,
-    so agent.py's working directory is already '/'.  Child processes inherit that
-    CWD automatically.  Passing cwd="/" would cause Python's subprocess to issue a
-    chdir('/') syscall in the child's pre-exec phase — proot may fail to intercept
-    this correctly before exec, producing [Errno 38] Function not implemented: '/'.
-    Letting the child inherit the parent's '/' CWD avoids any chdir syscall entirely.
+    All commands are wrapped in `busybox sh -c "cd /root && <cmd>"` so that
+    proot's chdir() handler fires before any child process calls getcwd().
+    Without this, subprocesses (npm, pip, etc.) fail with [Errno 38] ENOSYS
+    because proot hasn't recorded a valid CWD for the fork()ed child yet.
     """
     env = None
     if cmd and cmd[0] == "git":
         # Prevent git from reading /etc/gitconfig (causes ENOSYS in proot).
-        # Pre-create ~/.config/git so git doesn't stat a missing directory.
         git_cfg = os.path.expanduser("~/.config/git")
         os.makedirs(git_cfg, exist_ok=True)
         open(os.path.join(git_cfg, "config"), "a").close()
         env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
 
+    # Wrap in busybox sh so proot processes a chdir() before any getcwd() call.
+    shell_cmd = f"cd /root && {shlex.join(cmd)}"
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
+        "/bin/busybox", "sh", "-c", shell_cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,

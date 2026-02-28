@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mimetypes
 import os
+import shlex
 import sys
 import signal
 import platform
@@ -75,8 +76,11 @@ async def _log_requests(request: Request, call_next):
 def run_command(command, timeout=1):
     """Run a shell command and return the output"""
     try:
-        # Add timeout to prevent hanging forever
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
+        # Prepend cd /root so proot's chdir() fires before any getcwd() call
+        result = subprocess.run(
+            f"cd /root && {command}",
+            shell=True, capture_output=True, text=True, timeout=timeout,
+        )
         return result.stdout.strip()
     except subprocess.TimeoutExpired:
         print(f"⚠️ Command timed out: {command}")
@@ -424,7 +428,7 @@ async def _shutdown_and_restart(agent_dir: str):
     try:
         if os.path.exists(restart_sh):
             proc = subprocess.Popen(
-                ["bash", restart_sh],
+                ["/bin/busybox", "sh", "-c", f"cd /root && bash {shlex.quote(restart_sh)}"],
                 start_new_session=True,   # detach — survives parent's os._exit
                 stdin=subprocess.DEVNULL,
                 stdout=open(restart_log, "w"),
@@ -633,8 +637,9 @@ def _nas_tunnel_alive() -> bool:
 def _start_tunnel_proc(provider: dict) -> subprocess.Popen:
     """Launch the SSH subprocess for the given provider config."""
     os.makedirs(os.path.expanduser("~/.ssh"), mode=0o700, exist_ok=True)
+    shell_cmd = f"cd /root && {shlex.join(provider['cmd'])}"
     return subprocess.Popen(
-        provider["cmd"],
+        ["/bin/busybox", "sh", "-c", shell_cmd],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
@@ -733,8 +738,10 @@ async def nas_public_start():
     import shutil as _shutil
     if not _shutil.which("ssh"):
         try:
-            subprocess.run(["apk", "add", "--no-cache", "openssh-client"],
-                           check=True, capture_output=True, timeout=60)
+            subprocess.run(
+                ["/bin/busybox", "sh", "-c", "cd /root && apk add --no-cache openssh-client"],
+                check=True, capture_output=True, timeout=60,
+            )
         except Exception as e:
             return JSONResponse(status_code=503, content={
                 "running": False, "url": None,
