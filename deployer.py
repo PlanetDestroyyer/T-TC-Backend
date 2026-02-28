@@ -654,12 +654,21 @@ async def _setup_tunnel(app_id: str, port: int) -> str:
 
 
 def _github_tarball_url(repo_url: str) -> str | None:
-    """Convert a GitHub repo URL to its HEAD archive tarball URL, or None if not GitHub."""
-    m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", repo_url)
+    """Convert a GitHub repo URL to its HEAD archive tarball URL, or None if not GitHub.
+
+    Handles common variants:
+      https://github.com/user/repo
+      https://github.com/user/repo.git
+      https://github.com/user/repo/          ← trailing slash
+      https://github.com/user/repo/tree/main ← branch path
+    """
+    url = repo_url.strip().rstrip("/")
+    # Strip /tree/... or /blob/... suffixes
+    url = re.sub(r"/(tree|blob)/.*$", "", url)
+    m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", url)
     if not m:
         return None
     user, repo = m.group(1), m.group(2)
-    # /archive/HEAD.tar.gz follows the default branch regardless of name
     return f"https://github.com/{user}/{repo}/archive/HEAD.tar.gz"
 
 
