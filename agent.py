@@ -838,18 +838,20 @@ async def nas_upload_chunk(
 
 # ─── NAS File Browser ─────────────────────────────────────────────────────────
 
-# Resolve TinyCell folder — only use a storage path if its parent symlink exists
-# (~/storage/* symlinks are created by termux-setup-storage; fall back to Termux home)
+# Resolve TinyCell folder.
+# Embedded mode (proot): /sdcard is bind-mounted → /sdcard/Download/TinyCell is the real Downloads folder.
+# Termux mode: ~/storage/downloads → /sdcard/Download symlink works the same way.
+# Fallback: ~/TinyCell inside Termux/proot home (always writable, not visible in Files app).
 def _make_tinycell() -> str:
     candidates = [
-        os.path.expanduser("~/storage/downloads/TinyCell"),
-        os.path.expanduser("~/storage/shared/TinyCell"),
-        os.path.expanduser("~/TinyCell"),  # always available inside Termux home
+        "/sdcard/Download/TinyCell",                        # embedded proot + Termux
+        os.path.expanduser("~/storage/downloads/TinyCell"), # Termux symlink fallback
+        os.path.expanduser("~/TinyCell"),                   # last resort (always writable)
     ]
     for _p in candidates:
         parent = os.path.dirname(_p)
         if not os.path.exists(parent):
-            print(f"[NAS] Skipping {_p} — parent does not exist")
+            print(f"[NAS] Skipping {_p} — parent not accessible")
             continue
         try:
             os.makedirs(_p, exist_ok=True)
@@ -857,8 +859,11 @@ def _make_tinycell() -> str:
             return _p
         except Exception as _e:
             print(f"[NAS] Could not create {_p}: {_e}")
-    # Should never reach here
-    return candidates[0]
+    # ~/TinyCell always exists (home dir is always writable) — if we reach here something is very wrong
+    raise RuntimeError(
+        f"Cannot create TinyCell folder — tried: {candidates}. "
+        "Check storage permissions."
+    )
 
 _TINYCELL_DIR = _make_tinycell()
 
@@ -873,8 +878,8 @@ def _nas_resolve(root_name: str, subpath: str):
         return None, None
     root_abs = os.path.realpath(root_raw)
     target_abs = os.path.realpath(os.path.join(root_abs, subpath.lstrip("/")))
-    if not target_abs.startswith(root_abs):
-        return None, None  # block path traversal
+    if not (target_abs == root_abs or target_abs.startswith(root_abs + "/")):
+        return None, None  # block path traversal (fix: simple startswith allows /sdcard/Download/TinyCellFoo)
     return root_abs, target_abs
 
 

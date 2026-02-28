@@ -514,13 +514,13 @@ def _find_module(app_dir: str) -> str:
 
 def _launch_app(app: dict) -> subprocess.Popen | None:
     t, d, p = app["type"], app["app_dir"], app["port"]
-    # Use the per-app venv Python for isolation
-    venv_python = os.path.join(d, ".venv", "bin", "python")
-    py = venv_python if os.path.exists(venv_python) else sys.executable
-
-    # PYTHONPATH lets uvicorn/flask find the app module without changing directory.
-    # serve accepts an absolute path to the build dir — no cwd change needed at all.
-    env = {**os.environ, "PORT": str(p), "PYTHONPATH": d}
+    # Always use system python3 — no venv (venv creation triggers ENOSYS in proot).
+    # Packages are installed to .packages/ by _install_deps; put it on PYTHONPATH.
+    py = sys.executable
+    packages_dir = os.path.join(d, ".packages")
+    # PYTHONPATH: per-app packages first, then the app dir itself (for local imports).
+    pythonpath_parts = [packages_dir, d] if os.path.isdir(packages_dir) else [d]
+    env = {**os.environ, "PORT": str(p), "PYTHONPATH": os.pathsep.join(pythonpath_parts)}
 
     if t == "fastapi":
         cmd = [py, "-m", "uvicorn", f"{_find_module(d)}:app",
@@ -579,7 +579,15 @@ async def _setup_tunnel(app_id: str, port: int) -> str:
 
 
 async def _run_async(cmd: list[str], timeout: int = 120) -> str:
-    """Run a command asynchronously. Always starts in '/' so getcwd() never fails in proot."""
+    """Run a command asynchronously inside the proot Alpine environment.
+
+    CWD note: do NOT pass cwd= here. The proot session was started with --cwd=/,
+    so agent.py's working directory is already '/'.  Child processes inherit that
+    CWD automatically.  Passing cwd="/" would cause Python's subprocess to issue a
+    chdir('/') syscall in the child's pre-exec phase — proot may fail to intercept
+    this correctly before exec, producing [Errno 38] Function not implemented: '/'.
+    Letting the child inherit the parent's '/' CWD avoids any chdir syscall entirely.
+    """
     env = None
     if cmd and cmd[0] == "git":
         # Prevent git from reading /etc/gitconfig (causes ENOSYS in proot).
@@ -589,12 +597,8 @@ async def _run_async(cmd: list[str], timeout: int = 120) -> str:
         open(os.path.join(git_cfg, "config"), "a").close()
         env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
 
-    # cwd="/" ensures the child process starts in / via chdir() syscall (not fchdir).
-    # Git calls getcwd() at startup before processing any args — without this it
-    # inherits an untranslatable CWD from the proot parent and dies with ENOSYS.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        cwd="/",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -644,24 +648,24 @@ def _patch_requirements(req_path: str):
 
 async def _install_deps(app_dir: str, app_type: str):
     if app_type in ("flask", "fastapi"):
-        venv_dir = os.path.join(app_dir, ".venv")
-        if not os.path.exists(venv_dir):
-            # Pass venv_dir as absolute arg — no cwd needed
-            await _run_async([sys.executable, "-m", "venv", venv_dir], timeout=60)
-
-        venv_pip = os.path.join(venv_dir, "bin", "pip")
-        # Constraints file pins pydantic v1 for all transitive deps
-        constraints = os.path.join(app_dir, ".termux_constraints.txt")
-        with open(constraints, "w") as f:
-            f.write("pydantic==1.10.18\n")
+        # NO venv — `python3 -m venv` sets sys.path[0]='' which triggers os.getcwd()
+        # at Python startup, and getcwd() returns ENOSYS inside proot.
+        # Instead, install packages to a per-app .packages/ directory using pip's
+        # --target option.  The app process then gets PYTHONPATH=.packages/ so it
+        # can import them directly.  /usr/bin/pip3 is a script (not -m), so
+        # sys.path[0] is never '' and getcwd() is never called at startup.
+        packages_dir = os.path.join(app_dir, ".packages")
+        os.makedirs(packages_dir, exist_ok=True)
 
         req = os.path.join(app_dir, "requirements.txt")
         if os.path.exists(req):
             _patch_requirements(req)
-            # All paths are absolute — no cwd change required
             await _run_async(
-                [venv_pip, "install", "--prefer-binary", "--no-cache-dir",
-                 "-c", constraints, "-r", req],
+                ["/usr/bin/pip3", "install",
+                 "--prefer-binary", "--no-cache-dir",
+                 "--break-system-packages",
+                 "--target", packages_dir,
+                 "-r", req],
                 timeout=600,
             )
 
