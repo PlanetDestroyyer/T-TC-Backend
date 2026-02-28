@@ -549,7 +549,7 @@
 
   <script>
     const CHUNK = 5 * 1024 * 1024; // 5MB to prevent Cloudflare 100s timeout (HTTP 524)
-    const ROOT = 'shared_nas'; // single dedicated NAS folder — ~/storage/shared/shared_nas
+    const ROOT = 'tinycell'; // single dedicated NAS folder — Download/TinyCell/
     let path = [];       // current folder segments
     let delTarget = null;
 
@@ -641,7 +641,7 @@
           <button class="ibtn dl"  title="Download" onclick="dlFile('${esc(item.name)}');event.stopPropagation()">⬇</button>
           <button class="ibtn del" title="Delete"   onclick="askDel('${esc(item.name)}');event.stopPropagation()">🗑</button>
         </div>`;
-        const click = item.is_dir ? `openDir('${esc(item.name)}')` : `dlFile('${esc(item.name)}')`;
+        const click = item.is_dir ? `openDir('${esc(item.name)}')` : `openFile('${esc(item.name)}')`;
         return `
       <div class="file-row" onclick="${click}">
         <span class="ficon">${icon}</span>
@@ -659,7 +659,10 @@
     function openDir(name) { path.push(name); loadDir(); }
     function goBack() { if (path.length > 0) { path.pop(); loadDir(); } }
     function navTo(i) { if (i < 0) { path = []; loadDir(); } else { path = path.slice(0, i + 1); loadDir(); } }
-    function dlFile(name) { window.open(`/nas/download?${qs({ root: ROOT, path: [...path, name].join('/') })}`, '_blank'); }
+    // Open inline — browser shows images/PDFs/videos; falls back to download for others
+    function openFile(name) { window.open(`/nas/download?${qs({ root: ROOT, path: [...path, name].join('/') })}`, '_blank'); }
+    // Force Save dialog via ?download=1
+    function dlFile(name) { window.open(`/nas/download?${qs({ root: ROOT, path: [...path, name].join('/') })}&download=1`, '_blank'); }
 
     // ── Delete ────────────────────────────────────────────────────────────────────
     function askDel(name) { delTarget = name; document.getElementById('del-name').textContent = name; document.getElementById('del-overlay').classList.add('show'); }

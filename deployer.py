@@ -579,7 +579,7 @@ async def _setup_tunnel(app_id: str, port: int) -> str:
 
 
 async def _run_async(cmd: list[str], timeout: int = 120) -> str:
-    """Run a command asynchronously. Never uses cwd — passes all paths as explicit args."""
+    """Run a command asynchronously. Always starts in '/' so getcwd() never fails in proot."""
     env = None
     if cmd and cmd[0] == "git":
         # Prevent git from reading /etc/gitconfig (causes ENOSYS in proot).
@@ -589,8 +589,12 @@ async def _run_async(cmd: list[str], timeout: int = 120) -> str:
         open(os.path.join(git_cfg, "config"), "a").close()
         env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
 
+    # cwd="/" ensures the child process starts in / via chdir() syscall (not fchdir).
+    # Git calls getcwd() at startup before processing any args — without this it
+    # inherits an untranslatable CWD from the proot parent and dies with ENOSYS.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        cwd="/",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,

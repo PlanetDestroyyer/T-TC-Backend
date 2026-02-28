@@ -838,12 +838,32 @@ async def nas_upload_chunk(
 
 # ─── NAS File Browser ─────────────────────────────────────────────────────────
 
+# Resolve TinyCell folder — only use a storage path if its parent symlink exists
+# (~/storage/* symlinks are created by termux-setup-storage; fall back to Termux home)
+def _make_tinycell() -> str:
+    candidates = [
+        os.path.expanduser("~/storage/downloads/TinyCell"),
+        os.path.expanduser("~/storage/shared/TinyCell"),
+        os.path.expanduser("~/TinyCell"),  # always available inside Termux home
+    ]
+    for _p in candidates:
+        parent = os.path.dirname(_p)
+        if not os.path.exists(parent):
+            print(f"[NAS] Skipping {_p} — parent does not exist")
+            continue
+        try:
+            os.makedirs(_p, exist_ok=True)
+            print(f"[NAS] TinyCell folder ready: {_p}")
+            return _p
+        except Exception as _e:
+            print(f"[NAS] Could not create {_p}: {_e}")
+    # Should never reach here
+    return candidates[0]
+
+_TINYCELL_DIR = _make_tinycell()
+
 NAS_ROOTS: dict = {
-    "shared_nas": os.path.expanduser("~/storage/shared/shared_nas"),
-    "shared":     os.path.expanduser("~/storage/shared"),
-    "downloads":  os.path.expanduser("~/storage/downloads"),
-    "dcim":       os.path.expanduser("~/storage/dcim"),
-    "home":       os.path.expanduser("~"),
+    "tinycell": _TINYCELL_DIR,
 }
 
 def _nas_resolve(root_name: str, subpath: str):
@@ -907,8 +927,9 @@ def nas_browse(root: str = Query(...), path: str = Query(default="")):
 
 
 @app.get("/nas/download")
-def nas_download(root: str = Query(...), path: str = Query(...)):
-    """Stream a file download."""
+def nas_download(root: str = Query(...), path: str = Query(...), download: bool = Query(default=False)):
+    """Stream a file. Uses inline disposition by default so browsers preview it;
+    pass ?download=1 to force a Save dialog."""
     _, target = _nas_resolve(root, path)
     if target is None:
         return JSONResponse(status_code=403, content={"error": "Access denied"})
@@ -918,6 +939,7 @@ def nas_download(root: str = Query(...), path: str = Query(...)):
     mime, _ = mimetypes.guess_type(target)
     mime = mime or "application/octet-stream"
     filename = os.path.basename(target)
+    disposition = f'attachment; filename="{filename}"' if download else f'inline; filename="{filename}"'
 
     def streamer():
         with open(target, "rb") as f:
@@ -931,7 +953,7 @@ def nas_download(root: str = Query(...), path: str = Query(...)):
         streamer(),
         media_type=mime,
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": disposition,
             "Cache-Control": "no-store",
         },
     )
@@ -949,6 +971,7 @@ async def nas_upload(
     if target_dir is None:
         print(f"[NAS] Upload denied: invalid root={root!r} or path traversal in path={path!r}")
         return JSONResponse(status_code=403, content={"error": "Access denied"})
+    os.makedirs(target_dir, exist_ok=True)  # create folder if it doesn't exist yet
     if not os.path.isdir(target_dir):
         print(f"[NAS] Upload failed: target is not a directory: {target_dir!r}")
         return JSONResponse(status_code=400, content={"error": "Not a directory"})
