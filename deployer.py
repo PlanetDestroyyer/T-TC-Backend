@@ -751,39 +751,12 @@ async def _run_async(cmd: list[str], timeout: int = 120) -> str:
 
 # ─── Dependency installation ──────────────────────────────────────────────────
 
-# Packages requiring Rust/C compilation → pin to pure-Python alternatives.
-_TERMUX_PINS: dict[str, str | None] = {
-    "pydantic-core": None,               # drop — pulled by pydantic v2, needs Rust
-    "pydantic":      "pydantic==1.10.18", # v1 is pure Python
-    "fastapi":       "fastapi==0.110.0",  # works with pydantic v1
-    "uvicorn":       "uvicorn==0.27.1",
-}
-
+# ─── Dependency installation ──────────────────────────────────────────────────
 
 def _patch_requirements(req_path: str):
-    """Rewrite requirements.txt to replace Rust-dependent packages with Termux-safe versions."""
-    with open(req_path) as f:
-        lines = f.readlines()
-    patched, changed = [], False
-    for line in lines:
-        pkg = re.split(r"[>=<!;\[\s]", line.strip().lower())[0]
-        if not pkg or pkg.startswith("#"):
-            patched.append(line)
-            continue
-        if pkg in _TERMUX_PINS:
-            replacement = _TERMUX_PINS[pkg]
-            if replacement is None:
-                print(f"[DEPLOY] Dropping '{pkg}' (requires Rust)")
-            else:
-                print(f"[DEPLOY] Pinning '{pkg}' → '{replacement}'")
-                patched.append(replacement + "\n")
-            changed = True
-        else:
-            patched.append(line)
-    if changed:
-        shutil.copy2(req_path, req_path + ".orig")
-        with open(req_path, "w") as f:
-            f.writelines(patched)
+    """(Deprecated) Previously used to rewrite requirements.txt to replace Rust-dependent packages. 
+    No longer necessary on Debian glibc since manylinux wheels are available."""
+    pass
 
 
 def _write_pip_wrapper(packages_dir: str, req_path: str) -> str:
@@ -860,12 +833,11 @@ async def _install_deps(app_dir: str, app_type: str):
 
     elif app_type == "react":
         # Ensure nodejs/npm are installed (not present in Alpine by default).
-        # apk.static is a statically-linked binary — works without dynamic loader.
         node_bin = "/usr/bin/node"
         if not os.path.exists(node_bin):
-            print("[DEPLOY] Installing nodejs + npm via apk …")
+            print("[DEPLOY] Installing nodejs + npm via apt-get …")
             await _run_async(
-                ["/sbin/apk.static", "add", "--no-cache", "--no-scripts", "nodejs", "npm"],
+                ["apt-get", "install", "-y", "--no-install-recommends", "nodejs", "npm"],
                 timeout=300,
             )
 
