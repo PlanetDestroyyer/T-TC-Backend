@@ -865,7 +865,7 @@ async def _install_deps(app_dir: str, app_type: str):
         if not os.path.exists(node_bin):
             print("[DEPLOY] Installing nodejs + npm via apk …")
             await _run_async(
-                ["/sbin/apk.static", "add", "--no-cache", "nodejs", "npm"],
+                ["/sbin/apk.static", "add", "--no-cache", "--no-scripts", "nodejs", "npm"],
                 timeout=300,
             )
 
