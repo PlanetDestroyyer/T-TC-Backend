@@ -850,16 +850,26 @@ async def _install_deps(app_dir: str, app_type: str):
                     except OSError: pass
 
     elif app_type == "react":
-        # Node.js wrapper patches process.cwd before npm loads (avoids getcwd ENOSYS).
-        # npm --prefix uses absolute path so it never needs real CWD for its work.
-        # We serve the built output with Python http.server (no serve package needed).
+        # Ensure nodejs/npm are installed (not present in Alpine by default).
+        # apk.static is a statically-linked binary — works without dynamic loader.
+        node_bin = "/usr/bin/node"
+        if not os.path.exists(node_bin):
+            print("[DEPLOY] Installing nodejs + npm via apk …")
+            await _run_async(
+                ["/sbin/apk.static", "add", "--no-cache", "nodejs", "npm"],
+                timeout=300,
+            )
+
+        # Node.js --require preload patches process.cwd before npm loads (avoids getcwd ENOSYS).
+        # npm --prefix takes an absolute path so npm never needs the real CWD for its work.
+        # We serve the built output with Python http.server (no `serve` package needed at runtime).
         patch = _write_npm_cwd_patch()
         npm_cli = "/usr/lib/node_modules/npm/bin/npm-cli.js"
         await _run_async(
-            ["node", "--require", patch, npm_cli, "--prefix", app_dir, "install"],
+            [node_bin, "--require", patch, npm_cli, "--prefix", app_dir, "install"],
             timeout=900,
         )
         await _run_async(
-            ["node", "--require", patch, npm_cli, "--prefix", app_dir, "run", "build"],
+            [node_bin, "--require", patch, npm_cli, "--prefix", app_dir, "run", "build"],
             timeout=900,
         )
