@@ -872,14 +872,19 @@ NAS_ROOTS: dict = {
 }
 
 def _nas_resolve(root_name: str, subpath: str):
-    """Resolve root + subpath to absolute path. Returns (root_abs, target_abs) or (None, None)."""
+    """Resolve root + subpath to absolute path. Returns (root_abs, target_abs) or (None, None).
+
+    Uses abspath() NOT realpath() — realpath() follows symlinks (e.g. /sdcard →
+    /storage/emulated/0) which breaks proot bind-mount lookups since only /sdcard
+    is bound, not /storage/emulated/0.
+    """
     root_raw = NAS_ROOTS.get(root_name)
     if not root_raw:
         return None, None
-    root_abs = os.path.realpath(root_raw)
-    target_abs = os.path.realpath(os.path.join(root_abs, subpath.lstrip("/")))
+    root_abs = os.path.abspath(root_raw)
+    target_abs = os.path.abspath(os.path.join(root_abs, subpath.lstrip("/")))
     if not (target_abs == root_abs or target_abs.startswith(root_abs + "/")):
-        return None, None  # block path traversal (fix: simple startswith allows /sdcard/Download/TinyCellFoo)
+        return None, None  # block path traversal
     return root_abs, target_abs
 
 

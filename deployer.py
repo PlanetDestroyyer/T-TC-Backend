@@ -6,7 +6,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
+import urllib.request
 import uuid
 
 import psutil
@@ -237,7 +240,8 @@ async def _run_update(deploy_id: str, app_id: str):
         step("App stopped", done=True)
 
         step("Pulling latest code...")
-        await _run_async(["git", "-C", app_dir, "pull"], timeout=60)
+        # Re-download tarball to avoid git pull getcwd() ENOSYS inside proot
+        await _update_repo(app["repo_url"], app_dir)
         step("Code updated", done=True)
 
         step("Reinstalling dependencies...")
@@ -288,8 +292,8 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
             raise RuntimeError(f"App '{app_name}' already exists. Delete it first.")
 
         step("Cloning repository...")
-        # git clone takes dest as an explicit arg — no cwd needed
-        await _run_async(["git", "clone", "--depth=1", repo_url, app_dir], timeout=120)
+        # Download as tarball to avoid git getcwd() ENOSYS inside proot
+        await _clone_repo(repo_url, app_dir)
         step("Repository cloned", done=True)
 
         if app_type == "auto":
@@ -576,6 +580,71 @@ async def _setup_tunnel(app_id: str, port: int) -> str:
         _save(reg)
     print(f"🌐 Tunnel ready for '{app_id}': {url}")
     return url
+
+
+def _github_tarball_url(repo_url: str) -> str | None:
+    """Convert a GitHub repo URL to its HEAD archive tarball URL, or None if not GitHub."""
+    m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$", repo_url)
+    if not m:
+        return None
+    user, repo = m.group(1), m.group(2)
+    # /archive/HEAD.tar.gz follows the default branch regardless of name
+    return f"https://github.com/{user}/{repo}/archive/HEAD.tar.gz"
+
+
+async def _download_github_tarball(tarball_url: str, dest_dir: str):
+    """Download a GitHub archive tarball and extract it into dest_dir, stripping the top-level prefix."""
+    loop = asyncio.get_event_loop()
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        await loop.run_in_executor(None, lambda: urllib.request.urlretrieve(tarball_url, tmp_path))
+
+        def _extract():
+            os.makedirs(dest_dir, exist_ok=True)
+            with tarfile.open(tmp_path, "r:gz") as tf:
+                members = tf.getmembers()
+                if not members:
+                    return
+                # GitHub wraps everything in a top-level dir like "repo-HEAD/"
+                prefix = members[0].name.rstrip("/") + "/"
+                stripped = []
+                for m in members:
+                    if not m.name.startswith(prefix) or m.name == prefix.rstrip("/"):
+                        continue
+                    m.name = m.name[len(prefix):]
+                    if not m.name:
+                        continue
+                    stripped.append(m)
+                tf.extractall(dest_dir, members=stripped)
+
+        await loop.run_in_executor(None, _extract)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+async def _clone_repo(repo_url: str, dest_dir: str):
+    """Clone a repo into dest_dir using tarball download (no git subprocess — avoids getcwd() ENOSYS in proot)."""
+    tarball_url = _github_tarball_url(repo_url)
+    if tarball_url is None:
+        await _run_async(["git", "clone", "--depth=1", repo_url, dest_dir], timeout=180)
+        return
+    await _download_github_tarball(tarball_url, dest_dir)
+
+
+async def _update_repo(repo_url: str, dest_dir: str):
+    """Update an existing repo dir using tarball re-download (no git pull — avoids getcwd() ENOSYS in proot)."""
+    tarball_url = _github_tarball_url(repo_url)
+    if tarball_url is None:
+        await _run_async(["git", "-C", dest_dir, "pull"], timeout=60)
+        return
+    await _download_github_tarball(tarball_url, dest_dir)
 
 
 async def _run_async(cmd: list[str], timeout: int = 120) -> str:
