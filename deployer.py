@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import re
-import secrets
 import shutil
 import signal
 import subprocess
@@ -34,7 +33,6 @@ def _load() -> dict:
                 return json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             print(f"⚠️ Registry corrupt ({e}), resetting to empty")
-            # Back up the corrupt file for inspection
             try:
                 os.rename(_REGISTRY, _REGISTRY + ".corrupt")
             except OSError:
@@ -51,7 +49,6 @@ def _save(reg: dict):
 # ─── Activity Log ─────────────────────────────────────────────────────────────
 
 def _log_activity(action: str, app_id: str, detail: str = ""):
-    """Append a timestamped activity entry to the global activity log."""
     entry = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "action": action,
@@ -77,7 +74,6 @@ def get_activity_log(lines: int = 100) -> list[dict]:
         except Exception:
             pass
     return entries
-
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
@@ -146,7 +142,6 @@ def stop_app(app_id: str) -> bool:
     pids = _pids.pop(app_id, {})
     running_apps.pop(app_id, None)
     _kill(pids.get("app_pid"))
-    _kill(pids.get("proxy_pid"))
     # Keep tunnel alive intentionally — URL stays valid
     reg = _load()
     if app_id in reg["apps"]:
@@ -170,7 +165,6 @@ async def start_app(app_id: str) -> bool:
     reg["apps"][app_id]["pid"] = proc.pid
     _save(reg)
     _log_activity("start", app_id)
-    # Only start a new tunnel if none is alive
     existing_tunnel = _pids.get(app_id, {}).get("tunnel_pid")
     if not existing_tunnel or not _is_alive(existing_tunnel):
         asyncio.create_task(_setup_tunnel(app_id, app["port"]))
@@ -178,23 +172,17 @@ async def start_app(app_id: str) -> bool:
 
 
 def delete_app(app_id: str) -> bool:
-    # Kill everything including tunnel on explicit delete
     pids = _pids.pop(app_id, {})
     running_apps.pop(app_id, None)
     _kill(pids.get("app_pid"))
-    _kill(pids.get("proxy_pid"))
     _kill(pids.get("tunnel_pid"))
     reg = _load()
     app = reg["apps"].pop(app_id, None)
     _save(reg)
     if app:
         shutil.rmtree(app["app_dir"], ignore_errors=True)
-        _log_activity("delete", app_id, f"repo + venv wiped from {app['app_dir']}")
+        _log_activity("delete", app_id, f"wiped {app['app_dir']}")
     port_manager.release(app_id)
-    # Release proxy port
-    data_ports = port_manager._load()
-    data_ports["allocated"].pop(f"__proxy_{app_id}", None)
-    port_manager._save(data_ports)
     return True
 
 
@@ -214,7 +202,7 @@ async def deploy(repo_url: str, app_name: str, app_type: str, auto_restart: bool
 
 
 async def update_app(app_id: str) -> str:
-    """Pull latest code, reinstall deps, restart. Returns a deploy_id for progress polling."""
+    """Pull latest code, reinstall deps, restart. Returns deploy_id for progress polling."""
     deploy_id = uuid.uuid4().hex[:8]
     _deployments[deploy_id] = {
         "status": "deploying",
@@ -249,7 +237,7 @@ async def _run_update(deploy_id: str, app_id: str):
         step("App stopped", done=True)
 
         step("Pulling latest code...")
-        await _run_async(["git", "pull"], cwd=app_dir, timeout=60)
+        await _run_async(["git", "-C", app_dir, "pull"], timeout=60)
         step("Code updated", done=True)
 
         step("Reinstalling dependencies...")
@@ -287,7 +275,6 @@ async def _run_update(deploy_id: str, app_id: str):
         _log_activity("update_error", app_id, msg)
 
 
-
 async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: str, auto_restart: bool):
     app_dir = os.path.join(APPS_DIR, app_name)
 
@@ -301,6 +288,7 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
             raise RuntimeError(f"App '{app_name}' already exists. Delete it first.")
 
         step("Cloning repository...")
+        # git clone takes dest as an explicit arg — no cwd needed
         await _run_async(["git", "clone", "--depth=1", repo_url, app_dir], timeout=120)
         step("Repository cloned", done=True)
 
@@ -404,11 +392,10 @@ async def monitor_loop():
                         asyncio.create_task(_setup_tunnel(app_id, app["port"]))
                     changed = True
 
-            # ── Tunnel keepalive + health check (every 12 ticks = 2 min) ──
+            # ── Tunnel health check (every 12 ticks = 2 min) ──────────────
             if tick % 12 == 0:
                 tunnel_url = app.get("tunnel_url")
                 if not tunnel_url:
-                    # No URL yet — might be reconnecting already
                     continue
                 alive = await _probe_tunnel(tunnel_url)
                 if alive:
@@ -440,7 +427,6 @@ def shutdown_all():
     for app_id in list(_pids.keys()):
         pids = _pids.pop(app_id, {})
         _kill(pids.get("app_pid"))
-        _kill(pids.get("proxy_pid"))
         _kill(pids.get("tunnel_pid"))
     running_apps.clear()
     reg = _load()
@@ -450,14 +436,11 @@ def shutdown_all():
 
 
 async def update_all_apps() -> None:
-    """Pull latest code and restart every registered app. Fully awaits all updates."""
+    """Pull latest code and restart every registered app."""
     reg = _load()
     app_ids = list(reg["apps"].keys())
     if not app_ids:
         return
-
-    # Build _run_update coroutines directly — do NOT use update_app() which
-    # fire-and-forgets background tasks and returns immediately.
     tasks = []
     for app_id in app_ids:
         deploy_id = uuid.uuid4().hex[:8]
@@ -469,8 +452,6 @@ async def update_all_apps() -> None:
             "app_id": app_id,
         }
         tasks.append(_run_update(deploy_id, app_id))
-
-    # Run all app updates in parallel and wait for ALL to finish
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
@@ -488,15 +469,6 @@ def restore_on_startup():
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
-
-def _wrap_cwd(cmd: list[str], cwd: str) -> list[str]:
-    """Wraps commands in a python script that calls os.chdir() before os.execvp().
-    This bypasses Python's subprocess 'cwd=' which uses the fchdir() syscall (unhandled by PRoot)."""
-    import json
-    cmd_json = json.dumps(cmd)
-    cwd_json = json.dumps(cwd)
-    code = f"import os, sys; os.chdir({cwd_json}); os.execvp({cmd_json}[0], {cmd_json})"
-    return [sys.executable, "-c", code]
 
 def _is_alive(pid: int) -> bool:
     try:
@@ -542,27 +514,30 @@ def _find_module(app_dir: str) -> str:
 
 def _launch_app(app: dict) -> subprocess.Popen | None:
     t, d, p = app["type"], app["app_dir"], app["port"]
-    env = {**os.environ, "PORT": str(p)}
-    # Use the per-app venv Python for isolation (falls back to system python if venv missing)
+    # Use the per-app venv Python for isolation
     venv_python = os.path.join(d, ".venv", "bin", "python")
     py = venv_python if os.path.exists(venv_python) else sys.executable
+
+    # PYTHONPATH lets uvicorn/flask find the app module without changing directory.
+    # serve accepts an absolute path to the build dir — no cwd change needed at all.
+    env = {**os.environ, "PORT": str(p), "PYTHONPATH": d}
+
     if t == "fastapi":
-        cmd = [py, "-m", "uvicorn", f"{_find_module(d)}:app", "--host", "0.0.0.0", "--port", str(p)]
+        cmd = [py, "-m", "uvicorn", f"{_find_module(d)}:app",
+               "--host", "0.0.0.0", "--port", str(p)]
     elif t == "flask":
-        env["FLASK_APP"] = f"{_find_module(d)}.py"
+        env["FLASK_APP"] = os.path.join(d, f"{_find_module(d)}.py")
         cmd = [py, "-m", "flask", "run", "--host", "0.0.0.0", "--port", str(p)]
     elif t == "react":
-        build = "build" if os.path.exists(os.path.join(d, "build")) else "dist"
+        build = os.path.join(d, "build" if os.path.exists(os.path.join(d, "build")) else "dist")
         cmd = ["serve", "-s", build, "-l", str(p)]
     else:
         return None
+
     log = os.path.join(d, "app.log")
-    
-    # Avoid PRoot fchdir bug by wrapping instead of passing cwd=d
-    wrapped_cmd = _wrap_cwd(cmd, d)
-    
     with open(log, "a") as lf:
-        return subprocess.Popen(wrapped_cmd, cwd=None, stdout=lf, stderr=lf, env=env)
+        # No cwd= — all paths are absolute so the process never needs to chdir
+        return subprocess.Popen(cmd, stdout=lf, stderr=lf, env=env)
 
 
 def _start_tunnel_process(app_id: str, port: int) -> subprocess.Popen:
@@ -589,7 +564,7 @@ async def _wait_for_tunnel_url(app_id: str, timeout: int = 30) -> str:
 
 
 async def _setup_tunnel(app_id: str, port: int) -> str:
-    """Start cloudflared directly → app port, save URL, return it."""
+    """Start cloudflared → app port, persist URL, return it."""
     await asyncio.sleep(3)
     tunnel_proc = _start_tunnel_process(app_id, port)
     _pids.setdefault(app_id, {})["tunnel_pid"] = tunnel_proc.pid
@@ -603,29 +578,19 @@ async def _setup_tunnel(app_id: str, port: int) -> str:
     return url
 
 
-
-
-
-async def _run_async(cmd: list[str], cwd: str = None, timeout: int = 120) -> str:
+async def _run_async(cmd: list[str], timeout: int = 120) -> str:
+    """Run a command asynchronously. Never uses cwd — passes all paths as explicit args."""
     env = None
     if cmd and cmd[0] == "git":
-        # GIT_CONFIG_NOSYSTEM=1: skip /etc/gitconfig which can cause ENOSYS in proot.
-        # Also pre-create ~/.config/git/ so git doesn't stat a missing dir (also ENOSYS).
-        import os as _os
-        _git_cfg_dir = _os.path.expanduser("~/.config/git")
-        _os.makedirs(_git_cfg_dir, exist_ok=True)
-        open(_os.path.join(_git_cfg_dir, "config"), "a").close()  # ensure file exists
-        env = {**_os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
-        # git calls getcwd() at startup; proot fails to reverse-translate an inherited
-        # CWD (ENOSYS). Always provide an explicit cwd so git starts in a known path.
-        if cwd is None:
-            cwd = "/"
-            
-    if cwd is not None:
-        cmd = _wrap_cwd(cmd, cwd)
-        
+        # Prevent git from reading /etc/gitconfig (causes ENOSYS in proot).
+        # Pre-create ~/.config/git so git doesn't stat a missing directory.
+        git_cfg = os.path.expanduser("~/.config/git")
+        os.makedirs(git_cfg, exist_ok=True)
+        open(os.path.join(git_cfg, "config"), "a").close()
+        env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
+
     proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=None,
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -636,14 +601,14 @@ async def _run_async(cmd: list[str], cwd: str = None, timeout: int = 120) -> str
     return stdout.decode()
 
 
+# ─── Dependency installation ──────────────────────────────────────────────────
 
-# Packages that require Rust/C compilation → pin to pure-Python/pre-built alternatives.
-# Uses the same versions as the main TinyCell backend (known-good on Termux Python 3.12).
+# Packages requiring Rust/C compilation → pin to pure-Python alternatives.
 _TERMUX_PINS: dict[str, str | None] = {
-    "pydantic-core": None,               # drop — pulled in by pydantic v2, needs Rust
+    "pydantic-core": None,               # drop — pulled by pydantic v2, needs Rust
     "pydantic":      "pydantic==1.10.18", # v1 is pure Python
-    "fastapi":       "fastapi==0.110.0",  # same as main backend; works with pydantic v1
-    "uvicorn":       "uvicorn==0.27.1",   # same as main backend
+    "fastapi":       "fastapi==0.110.0",  # works with pydantic v1
+    "uvicorn":       "uvicorn==0.27.1",
 }
 
 
@@ -654,15 +619,15 @@ def _patch_requirements(req_path: str):
     patched, changed = [], False
     for line in lines:
         pkg = re.split(r"[>=<!;\[\s]", line.strip().lower())[0]
-        if not pkg or pkg.startswith("#"):  # skip blanks and comments
+        if not pkg or pkg.startswith("#"):
             patched.append(line)
             continue
         if pkg in _TERMUX_PINS:
             replacement = _TERMUX_PINS[pkg]
             if replacement is None:
-                print(f"[DEPLOY] Dropping '{pkg}' (requires Rust — not available on Termux)")
+                print(f"[DEPLOY] Dropping '{pkg}' (requires Rust)")
             else:
-                print(f"[DEPLOY] Pinning '{pkg}' → '{replacement}' (Termux-compatible)")
+                print(f"[DEPLOY] Pinning '{pkg}' → '{replacement}'")
                 patched.append(replacement + "\n")
             changed = True
         else:
@@ -675,30 +640,30 @@ def _patch_requirements(req_path: str):
 
 async def _install_deps(app_dir: str, app_type: str):
     if app_type in ("flask", "fastapi"):
-        # Create a per-app isolated venv so packages never touch the global/TinyCell env
         venv_dir = os.path.join(app_dir, ".venv")
         if not os.path.exists(venv_dir):
+            # Pass venv_dir as absolute arg — no cwd needed
             await _run_async([sys.executable, "-m", "venv", venv_dir], timeout=60)
+
         venv_pip = os.path.join(venv_dir, "bin", "pip")
-        # Write a constraints file that pins pydantic to v1 for ALL packages
-        # (including transitive deps). This prevents fastapi → pydantic v2 →
-        # pydantic-core → maturin (Rust) chain even when pydantic isn't in requirements.txt.
-        constraints_path = os.path.join(app_dir, ".termux_constraints.txt")
-        with open(constraints_path, "w") as f:
+        # Constraints file pins pydantic v1 for all transitive deps
+        constraints = os.path.join(app_dir, ".termux_constraints.txt")
+        with open(constraints, "w") as f:
             f.write("pydantic==1.10.18\n")
 
         req = os.path.join(app_dir, "requirements.txt")
         if os.path.exists(req):
             _patch_requirements(req)
+            # All paths are absolute — no cwd change required
             await _run_async(
                 [venv_pip, "install", "--prefer-binary", "--no-cache-dir",
-                 "-c", ".termux_constraints.txt", "-r", "requirements.txt"],
-                cwd=app_dir, timeout=600,
+                 "-c", constraints, "-r", req],
+                timeout=600,
             )
+
     elif app_type == "react":
-        # Install serve globally only if not already present
-        import shutil as _shutil
-        if not _shutil.which("serve"):
+        if not shutil.which("serve"):
             await _run_async(["npm", "install", "-g", "serve"], timeout=120)
-        await _run_async(["npm", "install"], cwd=app_dir, timeout=900)
-        await _run_async(["npm", "run", "build"], cwd=app_dir, timeout=900)
+        # --prefix tells npm which directory to operate in — no cwd change
+        await _run_async(["npm", "--prefix", app_dir, "install"], timeout=900)
+        await _run_async(["npm", "--prefix", app_dir, "run", "build"], timeout=900)
