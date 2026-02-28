@@ -360,8 +360,7 @@ async def _probe_tunnel(url: str) -> bool:
     """Return True if the tunnel URL responds with any HTTP status."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "/bin/busybox", "sh", "-c",
-            f"cd /root && curl -sf --max-time 8 -o /dev/null {shlex.quote(url)}",
+            "curl", "-sf", "--max-time", "8", "-o", "/dev/null", url,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -518,44 +517,109 @@ def _find_module(app_dir: str) -> str:
     return "main"
 
 
+def _write_python_launcher(app_id: str, app_type: str, module: str, port: int,
+                            packages_dir: str, app_dir: str) -> str:
+    """Write a Python launcher script that patches os.getcwd before starting the server.
+
+    Why a launcher script instead of `python3 -m uvicorn` or `python3 -m flask`:
+      When Python is invoked with -m, runpy sets sys.path[0] to '' (empty string).
+      Python's PathFinder then calls os.getcwd() to resolve it.  Inside proot on
+      Android, getcwd() can return ENOSYS because proot's reverse-translation of the
+      host CWD into a guest path fails.  A script file sets sys.path[0] to the script
+      directory (an absolute path), so os.getcwd() is never called during import.
+      We also patch os.getcwd as a belt-and-suspenders guard.
+    """
+    path = f"/tmp/tc_launch_{app_id}.py"
+    packages_repr = repr(packages_dir)
+    app_dir_repr = repr(app_dir)
+    if app_type == "fastapi":
+        content = f"""\
+import os as _o, sys
+_r = _o.getcwd
+def _g():
+    try: return _r()
+    except OSError: return '/'
+_o.getcwd = _g
+sys.path[:0] = [{packages_repr}, {app_dir_repr}]
+import uvicorn
+uvicorn.run("{module}:app", host="0.0.0.0", port={port}, log_level="info")
+"""
+    else:  # flask
+        content = f"""\
+import os as _o, sys
+_r = _o.getcwd
+def _g():
+    try: return _r()
+    except OSError: return '/'
+_o.getcwd = _g
+sys.path[:0] = [{packages_repr}, {app_dir_repr}]
+import importlib.util
+spec = importlib.util.spec_from_file_location("_app", {app_dir_repr} + "/{module}.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.app.run(host="0.0.0.0", port={port})
+"""
+    with open(path, "w") as f:
+        f.write(content)
+    return path
+
+
+def _write_static_server(app_id: str, build_dir: str, port: int) -> str:
+    """Write a Python http.server launcher for React build output.
+
+    Uses Python's stdlib http.server instead of Node.js serve to avoid the
+    Node.js process.cwd() / getcwd() ENOSYS issue inside proot.
+    """
+    path = f"/tmp/tc_serve_{app_id}.py"
+    content = f"""\
+import os as _o, sys, http.server, socketserver
+_r = _o.getcwd
+def _g():
+    try: return _r()
+    except OSError: return {repr(build_dir)}
+_o.getcwd = _g
+try: _o.chdir({repr(build_dir)})
+except OSError: pass
+Handler = http.server.SimpleHTTPRequestHandler
+httpd = socketserver.TCPServer(("0.0.0.0", {port}), Handler)
+httpd.allow_reuse_address = True
+httpd.serve_forever()
+"""
+    with open(path, "w") as f:
+        f.write(content)
+    return path
+
+
 def _launch_app(app: dict) -> subprocess.Popen | None:
     t, d, p = app["type"], app["app_dir"], app["port"]
-    # Always use system python3 — no venv (venv creation triggers ENOSYS in proot).
-    # Packages are installed to .packages/ by _install_deps; put it on PYTHONPATH.
     py = sys.executable
     packages_dir = os.path.join(d, ".packages")
-    # PYTHONPATH: per-app packages first, then the app dir itself (for local imports).
-    pythonpath_parts = [packages_dir, d] if os.path.isdir(packages_dir) else [d]
-    env = {**os.environ, "PORT": str(p), "PYTHONPATH": os.pathsep.join(pythonpath_parts)}
-
-    if t == "fastapi":
-        cmd = [py, "-m", "uvicorn", f"{_find_module(d)}:app",
-               "--host", "0.0.0.0", "--port", str(p)]
-    elif t == "flask":
-        env["FLASK_APP"] = os.path.join(d, f"{_find_module(d)}.py")
-        cmd = [py, "-m", "flask", "run", "--host", "0.0.0.0", "--port", str(p)]
-    elif t == "react":
-        build = os.path.join(d, "build" if os.path.exists(os.path.join(d, "build")) else "dist")
-        cmd = ["serve", "-s", build, "-l", str(p)]
-    else:
-        return None
-
+    app_id = app.get("id", os.path.basename(d))
+    env = {**os.environ, "PORT": str(p)}
     log = os.path.join(d, "app.log")
-    # Wrap in busybox sh so proot's chdir() fires before the app calls getcwd()
-    shell_cmd = f"cd /root && {shlex.join(cmd)}"
-    with open(log, "a") as lf:
-        return subprocess.Popen(
-            ["/bin/busybox", "sh", "-c", shell_cmd],
-            stdout=lf, stderr=lf, env=env,
-        )
+
+    if t in ("fastapi", "flask"):
+        # Launcher script patches os.getcwd before uvicorn/flask imports.
+        # Avoids python3 -m flag which triggers getcwd() via sys.path[0]=''.
+        launcher = _write_python_launcher(app_id, t, _find_module(d), p, packages_dir, d)
+        with open(log, "a") as lf:
+            return subprocess.Popen([py, launcher], stdout=lf, stderr=lf, env=env)
+
+    elif t == "react":
+        # Use Python http.server to serve the React build — no Node.js needed at runtime.
+        build = os.path.join(d, "build" if os.path.exists(os.path.join(d, "build")) else "dist")
+        launcher = _write_static_server(app_id, build, p)
+        with open(log, "a") as lf:
+            return subprocess.Popen([py, launcher], stdout=lf, stderr=lf, env=env)
+
+    return None
 
 
 def _start_tunnel_process(app_id: str, port: int) -> subprocess.Popen:
     log = os.path.join(APPS_DIR, app_id, "tunnel.log")
     with open(log, "w") as f:
         return subprocess.Popen(
-            ["/bin/busybox", "sh", "-c",
-             f"cd /root && cloudflared tunnel --url http://localhost:{port}"],
+            ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
             stdout=f, stderr=subprocess.STDOUT,
         )
 
@@ -655,25 +719,17 @@ async def _update_repo(repo_url: str, dest_dir: str):
 
 
 async def _run_async(cmd: list[str], timeout: int = 120) -> str:
-    """Run a command asynchronously inside the proot Alpine environment.
-
-    All commands are wrapped in `busybox sh -c "cd /root && <cmd>"` so that
-    proot's chdir() handler fires before any child process calls getcwd().
-    Without this, subprocesses (npm, pip, etc.) fail with [Errno 38] ENOSYS
-    because proot hasn't recorded a valid CWD for the fork()ed child yet.
-    """
+    """Run a command asynchronously. All paths must be absolute — never use shell cd
+    (busybox cd calls fchdir() which proot does not implement on ARM64 → ENOSYS)."""
     env = None
     if cmd and cmd[0] == "git":
-        # Prevent git from reading /etc/gitconfig (causes ENOSYS in proot).
         git_cfg = os.path.expanduser("~/.config/git")
         os.makedirs(git_cfg, exist_ok=True)
         open(os.path.join(git_cfg, "config"), "a").close()
         env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
 
-    # Wrap in busybox sh so proot processes a chdir() before any getcwd() call.
-    shell_cmd = f"cd /root && {shlex.join(cmd)}"
     proc = await asyncio.create_subprocess_exec(
-        "/bin/busybox", "sh", "-c", shell_cmd,
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -721,32 +777,89 @@ def _patch_requirements(req_path: str):
             f.writelines(patched)
 
 
+def _write_pip_wrapper(packages_dir: str, req_path: str) -> str:
+    """Write a pip wrapper script that patches os.getcwd before pip is imported.
+
+    Root cause: pip's startup checks `if sys.path[0] in ('', os.getcwd())`.
+    Both sides of `in` are always evaluated — so os.getcwd() is called regardless
+    of sys.path[0].  Inside proot, getcwd() returns ENOSYS.  Patching os.getcwd
+    BEFORE pip is imported suppresses the error.  Same technique used by
+    ProotModule.kt's bootstrap pip install (tc_pip.py).
+    """
+    path = "/tmp/tc_dep_pip.py"
+    # Copy req to /tmp so the wrapper can find it from an absolute path
+    tmp_req = "/tmp/tc_dep_req.txt"
+    shutil.copy2(req_path, tmp_req)
+    content = f"""\
+import os as _o, sys, runpy, importlib, shutil, glob
+_r = _o.getcwd
+def _g():
+    try: return _r()
+    except OSError: return '/'
+_o.getcwd = _g
+# musllinux fix so pip picks pre-built wheels (same as ProotModule bootstrap)
+for _mn in ('pip._vendor.packaging._musllinux', 'packaging._musllinux'):
+    try:
+        _m = importlib.import_module(_mn)
+        _MV = _m._MuslVersion
+        _m.musl_version = lambda: _MV(major=1, minor=1)
+    except Exception:
+        pass
+sys.argv = ['pip', 'install',
+            '--no-cache-dir', '--break-system-packages',
+            '--no-build-isolation', '--prefer-binary', '--ignore-installed',
+            '--target', {repr(packages_dir)},
+            '-r', {repr(tmp_req)}]
+runpy.run_module('pip', run_name='__main__', alter_sys=True)
+"""
+    with open(path, "w") as f:
+        f.write(content)
+    return path
+
+
+def _write_npm_cwd_patch() -> str:
+    """Write a Node.js --require preload that overrides process.cwd before npm loads.
+
+    Node.js calls process.cwd() during module resolution.  Inside proot, the
+    underlying getcwd() syscall returns ENOSYS.  Overriding process.cwd with a
+    no-throw stub (returning '/root') lets npm run with --prefix <abs_path>
+    without ever relying on the real CWD.
+    """
+    path = "/tmp/tc_node_cwd.js"
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write("process.cwd = () => '/root';\nprocess.chdir = () => {};\n")
+    return path
+
+
 async def _install_deps(app_dir: str, app_type: str):
     if app_type in ("flask", "fastapi"):
-        # NO venv — `python3 -m venv` sets sys.path[0]='' which triggers os.getcwd()
-        # at Python startup, and getcwd() returns ENOSYS inside proot.
-        # Instead, install packages to a per-app .packages/ directory using pip's
-        # --target option.  The app process then gets PYTHONPATH=.packages/ so it
-        # can import them directly.  /usr/bin/pip3 is a script (not -m), so
-        # sys.path[0] is never '' and getcwd() is never called at startup.
+        # Install to per-app .packages/ via a getcwd-patched pip wrapper.
+        # The launcher script (_write_python_launcher) puts .packages/ on sys.path.
         packages_dir = os.path.join(app_dir, ".packages")
         os.makedirs(packages_dir, exist_ok=True)
-
         req = os.path.join(app_dir, "requirements.txt")
         if os.path.exists(req):
             _patch_requirements(req)
-            await _run_async(
-                ["/usr/bin/pip3", "install",
-                 "--prefer-binary", "--no-cache-dir",
-                 "--break-system-packages",
-                 "--target", packages_dir,
-                 "-r", req],
-                timeout=600,
-            )
+            wrapper = _write_pip_wrapper(packages_dir, req)
+            try:
+                await _run_async([sys.executable, wrapper], timeout=600)
+            finally:
+                for p in ("/tmp/tc_dep_pip.py", "/tmp/tc_dep_req.txt"):
+                    try: os.unlink(p)
+                    except OSError: pass
 
     elif app_type == "react":
-        if not shutil.which("serve"):
-            await _run_async(["npm", "install", "-g", "serve"], timeout=120)
-        # --prefix tells npm which directory to operate in — no cwd change
-        await _run_async(["npm", "--prefix", app_dir, "install"], timeout=900)
-        await _run_async(["npm", "--prefix", app_dir, "run", "build"], timeout=900)
+        # Node.js wrapper patches process.cwd before npm loads (avoids getcwd ENOSYS).
+        # npm --prefix uses absolute path so it never needs real CWD for its work.
+        # We serve the built output with Python http.server (no serve package needed).
+        patch = _write_npm_cwd_patch()
+        npm_cli = "/usr/lib/node_modules/npm/bin/npm-cli.js"
+        await _run_async(
+            ["node", "--require", patch, npm_cli, "--prefix", app_dir, "install"],
+            timeout=900,
+        )
+        await _run_async(
+            ["node", "--require", patch, npm_cli, "--prefix", app_dir, "run", "build"],
+            timeout=900,
+        )
