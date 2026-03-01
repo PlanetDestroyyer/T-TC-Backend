@@ -749,15 +749,19 @@
       });
     }
 
-    // Chunked upload — adaptive sizing targeting 10s per chunk, with retry.
-    // Small chunks (512 KB start) survive Cloudflare quick-tunnel connection drops
-    // (~2 min cycle). Each chunk is retried up to 3 times on network failure.
+    // Chunked upload — adaptive sizing, Cloudflare-safe, with retry.
+    //
+    // Cloudflare's free quick-tunnel has a ~100s per-request timeout.
+    // Target 75s per chunk (25s headroom for TLS + latency).
+    // Worst-case: ~1 Mbps (0.125 MB/s) × 75s ≈ 9.3 MB → start at 8 MB.
+    // Adaptive logic adjusts up/down between 4 MB and 25 MB based on actual speed.
+    // Each chunk is retried up to 3 times on network failure (connection drops).
     async function uploadChunked(file, onProg) {
-      const TARGET_TIME_S = 10;          // target each chunk to finish in ~10s
-      const MIN_CHUNK = 256 * 1024;      // 256 KB minimum
-      const MAX_CHUNK = 4 * 1024 * 1024; // 4 MB maximum
+      const TARGET_TIME_S = 75;           // Cloudflare per-request timeout budget
+      const MIN_CHUNK = 4 * 1024 * 1024;  // 4 MB  — never slower than ~1 Mbps / 30s
+      const MAX_CHUNK = 25 * 1024 * 1024; // 25 MB — cap for memory + radio limits
       const MAX_RETRIES = 3;
-      let currentChunkSize = 512 * 1024; // start at 512 KB
+      let currentChunkSize = 8 * 1024 * 1024; // start at 8 MB (safe for 1 Mbps worst-case)
 
       const dir = path.join('/');
       let offset = 0;
