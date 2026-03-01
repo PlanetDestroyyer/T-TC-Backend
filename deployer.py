@@ -864,6 +864,12 @@ async def _install_deps(app_dir: str, app_type: str):
         # Use wrapper script as main entry point (NOT --require) to avoid getcwd ENOSYS.
         # See _write_npm_wrapper() for full explanation.
         # We serve the built output with Python http.server (no `serve` package needed at runtime).
+        # Pre-create npm cache dirs — npm's cacache does a non-recursive mkdir on _cacache/tmp
+        # and fails if the parent (.npm-cache) doesn't already exist.
+        npm_cache = os.path.join(app_dir, ".npm-cache")
+        os.makedirs(os.path.join(npm_cache, "_cacache", "tmp"), exist_ok=True)
+        os.makedirs(os.path.join(npm_cache, "_logs"), exist_ok=True)
+
         install_wrapper = _write_npm_wrapper(app_dir, ["--prefix", app_dir, "install"])
         await _run_async([node_bin, install_wrapper], timeout=900)
 
