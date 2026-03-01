@@ -857,10 +857,16 @@ def _make_tinycell() -> str:
             continue
         try:
             os.makedirs(_p, exist_ok=True)
+            # Verify actual file write access — Android 10+ scoped storage allows
+            # mkdir on /sdcard paths but blocks open(file, "wb") with PermissionError.
+            _probe = os.path.join(_p, ".tinycell_probe")
+            with open(_probe, "w") as _f:
+                _f.write("ok")
+            os.unlink(_probe)
             print(f"[NAS] TinyCell folder ready: {_p}")
             return _p
         except Exception as _e:
-            print(f"[NAS] Could not create {_p}: {_e}")
+            print(f"[NAS] Could not use {_p}: {_e}")
     # ~/TinyCell always exists (home dir is always writable) — if we reach here something is very wrong
     raise RuntimeError(
         f"Cannot create TinyCell folder — tried: {candidates}. "
