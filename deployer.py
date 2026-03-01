@@ -818,11 +818,15 @@ def _write_npm_wrapper(app_dir: str, npm_args: list[str]) -> str:
     # Build argv: ["node", npm_cli, ...npm_args]
     argv_json = json.dumps(["node", npm_cli] + npm_args)
     app_dir_json = json.dumps(app_dir)
+    npm_cache_json = json.dumps(os.path.join(app_dir, ".npm-cache"))
     content = f"""\
 // TinyCell npm wrapper — patches process.cwd before npm bootstrap
 process.cwd = () => {app_dir_json};
 process.chdir = () => {{}};
 process.argv = {argv_json};
+// Redirect npm cache to app dir — /root/.npm may not exist inside proot
+process.env.npm_config_cache = {npm_cache_json};
+process.env.HOME = {app_dir_json};
 require({json.dumps(npm_cli)});
 """
     with open(path, "w") as f:
