@@ -548,6 +548,66 @@ def debug_ssh():
     return results
 
 
+@app.post("/debug/ssh/setup")
+def debug_ssh_setup():
+    """Generate SSH host keys and fix sshd config. Call this if SSH connection drops after KEXINIT."""
+    import subprocess, os, signal, stat
+    results = {}
+
+    # Ensure required dirs exist with correct permissions
+    os.makedirs("/var/empty", exist_ok=True)
+    os.makedirs("/run", exist_ok=True)
+    os.makedirs("/root/.ssh", exist_ok=True)
+    os.chmod("/var/empty", 0o711)
+
+    # Generate Ed25519 key (most reliable in proot — no ECDSA/DSA syscall issues)
+    for key_type, key_file in [("ed25519", "/etc/ssh/ssh_host_ed25519_key"),
+                                ("rsa",     "/etc/ssh/ssh_host_rsa_key")]:
+        if not os.path.exists(key_file):
+            r = subprocess.run(
+                ["ssh-keygen", "-t", key_type, "-b", "3072" if key_type == "rsa" else "256",
+                 "-f", key_file, "-N", ""],
+                capture_output=True, text=True
+            )
+            results[f"keygen_{key_type}"] = {"exit_code": r.returncode, "stderr": r.stderr.strip()}
+        else:
+            results[f"keygen_{key_type}"] = {"exit_code": 0, "stderr": "already exists"}
+
+    # Write sshd_config with all required proot fixes
+    sshd_config = """\
+Port 2222
+PermitRootLogin yes
+PasswordAuthentication yes
+PermitEmptyPasswords no
+UsePrivilegeSeparation no
+UsePAM no
+PidFile /run/sshd.pid
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+AuthorizedKeysFile .ssh/authorized_keys
+PrintMotd no
+"""
+    with open("/etc/ssh/sshd_config", "w") as f:
+        f.write(sshd_config)
+    results["sshd_config"] = "written"
+
+    # Set root password to "tinycell"
+    r = subprocess.run(["chpasswd"], input="root:tinycell", capture_output=True, text=True)
+    results["chpasswd"] = {"exit_code": r.returncode, "stderr": r.stderr.strip()}
+
+    # Test config
+    r = subprocess.run(["/usr/sbin/sshd", "-t"], capture_output=True, text=True)
+    results["config_test"] = {"exit_code": r.returncode, "stderr": r.stderr.strip()}
+
+    # Kill existing sshd and restart
+    subprocess.run(["pkill", "-f", "sshd"], capture_output=True)
+    import time; time.sleep(1)
+    r = subprocess.Popen(["/usr/sbin/sshd", "-D", "-e", "-p", "2222"])
+    results["sshd_restarted"] = {"pid": r.pid}
+
+    return results
+
+
 @app.get("/scan")
 def scan_hardware():
     cpu_info = run_command("cat /proc/cpuinfo")
