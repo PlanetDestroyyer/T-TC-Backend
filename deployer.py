@@ -827,6 +827,23 @@ process.argv = {argv_json};
 // Redirect npm cache to app dir — /root/.npm may not exist inside proot
 process.env.npm_config_cache = {npm_cache_json};
 process.env.HOME = {app_dir_json};
+
+// Force all fs.mkdir calls to use recursive:true.
+// Inside proot on Android, Node's recursive-mkdir walk fails when the CWD is
+// corrupted (getcwd ENOSYS after apk runs).  npm calls mkdir for nested paths
+// like node_modules/@scope/pkg without guaranteeing the parent exists first,
+// so we intercept every mkdir and always pass recursive:true so the kernel
+// handles intermediate directory creation in a single syscall.
+const _fs = require('fs');
+const _omk = _fs.mkdir.bind(_fs);
+_fs.mkdir = function(p, o, cb) {{
+  if (typeof o === 'function') {{ cb = o; o = {{}}; }}
+  if (typeof o === 'number') o = {{ mode: o }};
+  _omk(p, {{ ...(o || {{}}), recursive: true }}, cb);
+}};
+const _opmp = _fs.promises.mkdir.bind(_fs.promises);
+_fs.promises.mkdir = (p, o) => _opmp(p, {{ ...(o || {{}}), recursive: true }});
+
 require({json.dumps(npm_cli)});
 """
     with open(path, "w") as f:
