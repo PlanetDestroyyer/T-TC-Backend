@@ -835,9 +835,9 @@ async def _install_deps(app_dir: str, app_type: str):
         # Ensure nodejs/npm are installed (not present in Alpine by default).
         node_bin = "/usr/bin/node"
         if not os.path.exists(node_bin):
-            print("[DEPLOY] Installing nodejs + npm via apt-get …")
+            print("[DEPLOY] Installing nodejs + npm via apk …")
             await _run_async(
-                ["apt-get", "install", "-y", "--no-install-recommends", "nodejs", "npm"],
+                ["apk", "add", "--no-cache", "--no-scripts", "nodejs", "npm"],
                 timeout=300,
             )
 
