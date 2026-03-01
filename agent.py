@@ -614,7 +614,7 @@ _NAS_URL_RE = re.compile(
     r"https://[a-z0-9-]+\.(a\.pinggy\.io|lhr\.life|serveo\.net)"
 )
 _NAS_TUNNEL_LOG = os.path.expanduser("~/.nas_tunnel.log")
-_NAS_CHUNKS_DIR = os.path.expanduser("~/.nas_chunks")
+_NAS_CHUNKS_DIR = "/tmp/tc_nas_chunks"  # /tmp is bind-mounted from app cache dir — always writable in proot
 _nas_state: dict = {
     "proc": None,
     "url": None,
