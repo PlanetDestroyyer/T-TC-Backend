@@ -514,6 +514,40 @@ def get_activity(lines: int = 100):
     return {"events": deployer.get_activity_log(lines)}
 
 
+@app.get("/debug/ssh")
+def debug_ssh():
+    """Check sshd config, host keys, and shadow file for SSH debugging."""
+    import subprocess, os
+    results = {}
+    # Test sshd config
+    r = subprocess.run(["/usr/sbin/sshd", "-t"], capture_output=True, text=True)
+    results["sshd_config_test"] = {"exit_code": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+    # List host keys
+    results["host_keys"] = []
+    for f in os.listdir("/etc/ssh"):
+        if f.startswith("ssh_host_"):
+            p = f"/etc/ssh/{f}"
+            results["host_keys"].append({"name": f, "size": os.path.getsize(p)})
+    # Check shadow file exists
+    results["shadow_exists"] = os.path.exists("/etc/shadow")
+    results["shadow_root_line"] = ""
+    if results["shadow_exists"]:
+        with open("/etc/shadow") as fh:
+            for line in fh:
+                if line.startswith("root:"):
+                    # Show only the hash prefix, not the full hash
+                    parts = line.strip().split(":")
+                    results["shadow_root_line"] = f"root:{parts[1][:10]}... (hash present={len(parts[1])>3})"
+                    break
+    # Check /var/empty permissions
+    import stat
+    ve = "/var/empty"
+    if os.path.exists(ve):
+        s = os.stat(ve)
+        results["var_empty_mode"] = oct(stat.S_IMODE(s.st_mode))
+    return results
+
+
 @app.get("/scan")
 def scan_hardware():
     cpu_info = run_command("cat /proc/cpuinfo")
