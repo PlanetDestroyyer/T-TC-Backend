@@ -799,18 +799,34 @@ runpy.run_module('pip', run_name='__main__', alter_sys=True)
     return path
 
 
-def _write_npm_cwd_patch() -> str:
-    """Write a Node.js --require preload that overrides process.cwd before npm loads.
+def _write_npm_wrapper(app_dir: str, npm_args: list[str]) -> str:
+    """Write a Node.js wrapper script that patches process.cwd BEFORE npm loads.
 
-    Node.js calls process.cwd() during module resolution.  Inside proot, the
-    underlying getcwd() syscall returns ENOSYS.  Overriding process.cwd with a
-    no-throw stub (returning '/root') lets npm run with --prefix <abs_path>
-    without ever relying on the real CWD.
+    WHY NOT --require:
+      When Node.js is invoked with any --require flag it calls _preloadModules(),
+      which calls process.cwd() internally BEFORE executing the required module.
+      Inside proot on Android, getcwd() returns ENOSYS → crash before our patch runs.
+
+    THE FIX:
+      Run the wrapper as the main script (no --require).  Node does NOT call
+      process.cwd() during startup for a plain script file.  The wrapper patches
+      process.cwd / process.chdir first, rewrites process.argv to match npm's
+      expected layout, then requires npm-cli.js — at which point the patch is live.
     """
-    path = "/tmp/tc_node_cwd.js"
-    if not os.path.exists(path):
-        with open(path, "w") as f:
-            f.write("process.cwd = () => '/root';\nprocess.chdir = () => {};\n")
+    path = "/tmp/tc_npm_wrap.js"
+    npm_cli = "/usr/lib/node_modules/npm/bin/npm-cli.js"
+    # Build argv: ["node", npm_cli, ...npm_args]
+    argv_json = json.dumps(["node", npm_cli] + npm_args)
+    app_dir_json = json.dumps(app_dir)
+    content = f"""\
+// TinyCell npm wrapper — patches process.cwd before npm bootstrap
+process.cwd = () => {app_dir_json};
+process.chdir = () => {{}};
+process.argv = {argv_json};
+require({json.dumps(npm_cli)});
+"""
+    with open(path, "w") as f:
+        f.write(content)
     return path
 
 
@@ -841,16 +857,11 @@ async def _install_deps(app_dir: str, app_type: str):
                 timeout=300,
             )
 
-        # Node.js --require preload patches process.cwd before npm loads (avoids getcwd ENOSYS).
-        # npm --prefix takes an absolute path so npm never needs the real CWD for its work.
+        # Use wrapper script as main entry point (NOT --require) to avoid getcwd ENOSYS.
+        # See _write_npm_wrapper() for full explanation.
         # We serve the built output with Python http.server (no `serve` package needed at runtime).
-        patch = _write_npm_cwd_patch()
-        npm_cli = "/usr/lib/node_modules/npm/bin/npm-cli.js"
-        await _run_async(
-            [node_bin, "--require", patch, npm_cli, "--prefix", app_dir, "install"],
-            timeout=900,
-        )
-        await _run_async(
-            [node_bin, "--require", patch, npm_cli, "--prefix", app_dir, "run", "build"],
-            timeout=900,
-        )
+        install_wrapper = _write_npm_wrapper(app_dir, ["--prefix", app_dir, "install"])
+        await _run_async([node_bin, install_wrapper], timeout=900)
+
+        build_wrapper = _write_npm_wrapper(app_dir, ["--prefix", app_dir, "run", "build"])
+        await _run_async([node_bin, build_wrapper], timeout=900)
