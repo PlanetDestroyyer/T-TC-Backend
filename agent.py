@@ -830,6 +830,10 @@ async def nas_upload_chunk(
             size = os.path.getsize(dest)
             print(f"[NAS-CHUNK] Upload complete: {dest!r} ({size} bytes)")
             return {"status": "complete", "filename": safe_name, "size": size}
+        except PermissionError as e:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+            print(f"[NAS-CHUNK] Permission denied assembling to {dest!r}: {e}")
+            return JSONResponse(status_code=403, content={"error": "Write permission denied"})
         except Exception as e:
             shutil.rmtree(chunk_dir, ignore_errors=True)
             print(f"[NAS-CHUNK] Assembly error: {e!r}")
