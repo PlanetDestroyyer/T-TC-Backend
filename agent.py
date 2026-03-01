@@ -564,22 +564,35 @@ def debug_ssh_setup():
     else:
         results["apk_install"] = {"exit_code": 0, "stdout": "already installed"}
 
+    import shutil
     os.makedirs("/etc/dropbear", exist_ok=True)
     os.makedirs("/root/.ssh", exist_ok=True)
 
-    # Generate host keys
+    # dropbearkey generates to a temp file then rename()s to the final path.
+    # rename() / renameat() fails with ENOSYS inside proot after apk has run
+    # (apk's fchdir corrupts proot's AT_FDCWD tracking for the session).
+    # Workaround: generate to /tmp (host-backed bind mount, rename works there),
+    # then copy to /etc/dropbear/ with Python (uses read/write, not rename).
     for key_type, key_file in [("ed25519", "/etc/dropbear/dropbear_ed25519_hostkey"),
                                 ("rsa",     "/etc/dropbear/dropbear_rsa_hostkey")]:
-        if os.path.exists(key_file):
-            os.unlink(key_file)
-        args = ["dropbearkey", "-t", key_type, "-f", key_file]
+        tmp_key = f"/tmp/db_{key_type}_hostkey"
+        for f in [key_file, tmp_key]:
+            try: os.unlink(f)
+            except FileNotFoundError: pass
+        args = ["dropbearkey", "-t", key_type, "-f", tmp_key]
         if key_type == "rsa":
             args += ["-s", "2048"]
         r = subprocess.run(args, capture_output=True, text=True)
+        # Copy from /tmp to /etc/dropbear/ using Python (avoids rename syscall)
+        copied = False
+        if os.path.exists(tmp_key) and os.path.getsize(tmp_key) > 0:
+            shutil.copy2(tmp_key, key_file)
+            os.chmod(key_file, 0o600)
+            copied = True
         results[f"keygen_{key_type}"] = {
             "exit_code": r.returncode,
-            "stdout": r.stdout.strip(),
             "stderr": r.stderr.strip(),
+            "copied": copied,
             "size": os.path.getsize(key_file) if os.path.exists(key_file) else 0,
         }
 
