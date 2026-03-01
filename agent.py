@@ -580,7 +580,6 @@ PermitRootLogin yes
 PasswordAuthentication yes
 PermitEmptyPasswords no
 UsePrivilegeSeparation no
-UsePAM no
 PidFile /run/sshd.pid
 HostKey /etc/ssh/ssh_host_ed25519_key
 HostKey /etc/ssh/ssh_host_rsa_key
