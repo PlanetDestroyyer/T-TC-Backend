@@ -711,9 +711,9 @@
         const barEl = document.getElementById(id + 'b');
         const pctEl = document.getElementById(id + 'p');
         try {
-          const CHUNK_THRESHOLD = 5 * 1024 * 1024;
-          const uploader = file.size > CHUNK_THRESHOLD ? uploadChunked : uploadFile;
-          await uploader(file, pct => { barEl.style.width = pct + '%'; pctEl.textContent = Math.round(pct) + '%'; });
+          // Always use chunked — Cloudflare quick tunnels drop connections
+          // every ~2 min; chunked with retry survives those drops.
+          await uploadChunked(file, pct => { barEl.style.width = pct + '%'; pctEl.textContent = Math.round(pct) + '%'; });
           document.getElementById(id)?.classList.add('done');
           pctEl.textContent = '✓';
           toast(`✓ ${file.name} uploaded`, 'ok');
@@ -749,57 +749,60 @@
       });
     }
 
-    // Large-file chunked upload with ADAPTIVE chunking (target: 75 seconds, 4MB - 25MB)
+    // Chunked upload — adaptive sizing targeting 10s per chunk, with retry.
+    // Small chunks (512 KB start) survive Cloudflare quick-tunnel connection drops
+    // (~2 min cycle). Each chunk is retried up to 3 times on network failure.
     async function uploadChunked(file, onProg) {
-      const TARGET_TIME_S = 75;
-      const MIN_CHUNK = 4 * 1024 * 1024;
-      const MAX_CHUNK = 25 * 1024 * 1024;
-      let currentChunkSize = 8 * 1024 * 1024; // Start with 8 MB
+      const TARGET_TIME_S = 10;          // target each chunk to finish in ~10s
+      const MIN_CHUNK = 256 * 1024;      // 256 KB minimum
+      const MAX_CHUNK = 4 * 1024 * 1024; // 4 MB maximum
+      const MAX_RETRIES = 3;
+      let currentChunkSize = 512 * 1024; // start at 512 KB
 
       const dir = path.join('/');
       let offset = 0;
       let chunkIndex = 0;
 
       while (offset < file.size) {
-        // Clamp the slice to file size
         const bytesRemaining = file.size - offset;
         const sendBytes = Math.min(bytesRemaining, currentChunkSize);
         const chunk = file.slice(offset, offset + sendBytes);
         const isLast = (offset + sendBytes) >= file.size;
 
-        const form = new FormData();
-        form.append('file', chunk, file.name);
+        const q = qs({ root: ROOT, path: dir, filename: file.name, chunk_index: chunkIndex, is_last: isLast });
 
-        // No longer relying on total_chunks, we use is_last to assemble
-        const q = qs({
-          root: ROOT,
-          path: dir,
-          filename: file.name,
-          chunk_index: chunkIndex,
-          is_last: isLast
-        });
-
-        const startTime = performance.now();
-        const res = await fetch(`/nas/upload-chunk?${q}`, { method: 'POST', body: form });
-        const endTime = performance.now();
-
-        if (!res.ok) {
-          let msg = `chunk ${chunkIndex} HTTP ${res.status}`;
-          try { const j = await res.json(); msg = j.error || msg; } catch (_) { }
-          throw new Error(msg);
+        let res, startTime, endTime;
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+          if (attempt > 0) {
+            await new Promise(r => setTimeout(r, 2000 * attempt)); // back-off before retry
+          }
+          const form = new FormData();
+          form.append('file', chunk, file.name);
+          startTime = performance.now();
+          try {
+            res = await fetch(`/nas/upload-chunk?${q}`, { method: 'POST', body: form });
+            endTime = performance.now();
+            if (res.ok) break;
+            if (attempt === MAX_RETRIES) {
+              let msg = `chunk ${chunkIndex} HTTP ${res.status}`;
+              try { const j = await res.json(); msg = j.error || msg; } catch (_) {}
+              throw new Error(msg);
+            }
+          } catch (e) {
+            if (attempt === MAX_RETRIES) throw e;
+            // network error — retry
+          }
         }
 
         offset += sendBytes;
         chunkIndex++;
         onProg((offset / file.size) * 100);
 
-        if (!isLast) {
-          // Adaptive logic
-          const durationS = (endTime - startTime) / 1000;
-          let newChunkSize = Math.floor(currentChunkSize * (TARGET_TIME_S / durationS));
-
-          // Clamp between 4 MB and 25 MB
-          currentChunkSize = Math.max(MIN_CHUNK, Math.min(MAX_CHUNK, newChunkSize));
+        // Adapt chunk size to hit TARGET_TIME_S
+        const durationS = (endTime - startTime) / 1000;
+        if (durationS > 0) {
+          const newSize = Math.floor(currentChunkSize * (TARGET_TIME_S / durationS));
+          currentChunkSize = Math.max(MIN_CHUNK, Math.min(MAX_CHUNK, newSize));
         }
       }
     }
