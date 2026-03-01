@@ -933,6 +933,8 @@ def nas_browse(root: str = Query(...), path: str = Query(default="")):
                 continue
     except PermissionError:
         return JSONResponse(status_code=403, content={"error": "Permission denied"})
+    except OSError as e:
+        return JSONResponse(status_code=500, content={"error": f"Could not read directory: {e}"})
 
     items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
     return {"root": root, "path": path, "items": items}

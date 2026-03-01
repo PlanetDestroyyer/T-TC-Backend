@@ -601,8 +601,16 @@
       try {
         const p = path.join('/');
         const q = qs(p ? { root: ROOT, path: p } : { root: ROOT });
-        const r = await fetch(`/nas/browse?${q}`).then(r => r.json());
+        const res = await fetch(`/nas/browse?${q}`);
+        const text = await res.text();
+        let r;
+        try {
+          r = JSON.parse(text);
+        } catch (_) {
+          throw new Error(`Server returned non-JSON (HTTP ${res.status}): ${text.slice(0, 200)}`);
+        }
         if (r.error) throw new Error(r.error);
+        if (r.detail) throw new Error(r.detail);  // FastAPI's default error shape
         renderFiles(r.items || []);
       } catch (e) {
         setSection(`<div class="state"><span class="si">⚠️</span><p style="color:var(--red)">${escH(e.message)}</p></div>`);
