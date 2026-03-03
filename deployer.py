@@ -896,6 +896,10 @@ async def _install_deps(app_dir: str, app_type: str):
         npm_cache = os.path.join(app_dir, ".npm-cache")
         os.makedirs(os.path.join(npm_cache, "_cacache", "tmp"), exist_ok=True)
         os.makedirs(os.path.join(npm_cache, "_logs"), exist_ok=True)
+        # Pre-create node_modules so npm only needs to create subdirs (not the root dir).
+        # Inside proot, npm's first mkdir for node_modules can fail if proot's CWD state
+        # is corrupt — pre-creating it guarantees the parent always exists.
+        os.makedirs(os.path.join(app_dir, "node_modules"), exist_ok=True)
 
         install_wrapper = _write_npm_wrapper(app_dir, ["--prefix", app_dir, "install"])
         await _run_async([node_bin, install_wrapper], timeout=900)
