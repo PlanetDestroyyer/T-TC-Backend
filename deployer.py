@@ -949,39 +949,12 @@ async def _install_deps(app_dir: str, app_type: str):
         # (Confirmed fix: termux/proot-distro#548)
         node_bin = "/usr/bin/node"
         yarn_bin = "/usr/bin/yarn"
-        # Detect package manager: Alpine uses apk, Debian/Ubuntu uses apt-get
-        pkg_mgr = "apk" if os.path.exists("/sbin/apk") else "apt-get"
+        # nodejs + yarn are pre-installed by bootstrap.sh at setup time.
+        # We never run apk here — apk corrupts proot's AT_FDCWD tracking mid-session.
         if not os.path.exists(node_bin):
-            print(f"[DEPLOY] Installing nodejs via {pkg_mgr} …")
-            if pkg_mgr == "apk":
-                # apk post-install scripts fail with fchdir ENOSYS inside proot, but
-                # the package files ARE extracted. Ignore exit code, check binary exists.
-                try:
-                    await _run_async(["apk", "add", "--no-cache", "nodejs"], timeout=300)
-                except Exception:
-                    pass
-                if not os.path.exists(node_bin):
-                    raise RuntimeError("nodejs install failed — binary not found after apk add")
-            else:
-                await _run_async(["apt-get", "install", "-y", "nodejs"], timeout=300)
+            raise RuntimeError("nodejs not found — reinstall TinyCell app to re-run bootstrap")
         if not os.path.exists(yarn_bin):
-            print(f"[DEPLOY] Installing yarn via {pkg_mgr} …")
-            if pkg_mgr == "apk":
-                try:
-                    await _run_async(["apk", "add", "--no-cache", "yarn"], timeout=300)
-                except Exception:
-                    pass
-                if not os.path.exists(yarn_bin):
-                    raise RuntimeError("yarn install failed — binary not found after apk add")
-            else:
-                try:
-                    await _run_async(["apt-get", "install", "-y", "yarn"], timeout=300)
-                except Exception as e:
-                    print(f"[DEPLOY] apt yarn failed ({e}), trying corepack …")
-                    await _run_async([node_bin, "-e",
-                        "require('child_process').execFileSync(process.execPath,"
-                        " [require('path').join(require('path').dirname(process.execPath), 'corepack'),"
-                        " 'enable', 'yarn'], {stdio:'inherit'})"], timeout=120)
+            raise RuntimeError("yarn not found — reinstall TinyCell app to re-run bootstrap")
 
         # Pre-create node_modules and yarn cache dir.
         os.makedirs(os.path.join(app_dir, "node_modules"), exist_ok=True)
