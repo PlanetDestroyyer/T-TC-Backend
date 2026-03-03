@@ -917,6 +917,26 @@ process.cwd = () => {app_dir_json};
 process.chdir = () => {{}};
 process.argv = {argv_json};
 process.env.HOME = {app_dir_json};
+
+// proot returns ENOSYS instead of ENOENT for openSync() on non-existent paths.
+// Yarn calls openSync() on multiple config paths at startup (parseRcPaths/findRc)
+// and expects ENOENT when they're missing. ENOSYS causes an unhandled crash.
+// Patch openSync to convert ENOSYS -> ENOENT so yarn handles it gracefully.
+const _fs = require('fs');
+const _origOpenSync = _fs.openSync.bind(_fs);
+_fs.openSync = function(path, flags, mode) {{
+  try {{
+    return _origOpenSync(path, flags, mode);
+  }} catch(e) {{
+    if (e && e.code === 'ENOSYS') {{
+      const err = new Error('ENOENT: no such file or directory, open \\'' + path + '\\'');
+      err.code = 'ENOENT'; err.syscall = 'open'; err.path = path;
+      throw err;
+    }}
+    throw e;
+  }}
+}};
+
 require({json.dumps(yarn_cli)});
 """
     with open(path, "w") as f:
