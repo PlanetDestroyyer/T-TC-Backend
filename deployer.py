@@ -752,7 +752,10 @@ async def _run_async(cmd: list[str], timeout: int = 120) -> str:
     )
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     if proc.returncode != 0:
-        raise RuntimeError(stderr.decode().strip() or "Command failed")
+        err = stderr.decode().strip()
+        out = stdout.decode().strip()
+        msg = err or out or "Command failed"
+        raise RuntimeError(msg)
     return stdout.decode()
 
 
@@ -936,10 +939,18 @@ async def _install_deps(app_dir: str, app_type: str):
                 await _run_async(["apt-get", "install", "-y", "nodejs"], timeout=300)
         if not os.path.exists(yarn_bin):
             print(f"[DEPLOY] Installing yarn via {pkg_mgr} …")
-            if pkg_mgr == "apk":
-                await _run_async(["apk", "add", "--no-cache", "--no-scripts", "yarn"], timeout=300)
-            else:
-                await _run_async(["apt-get", "install", "-y", "yarn"], timeout=300)
+            try:
+                if pkg_mgr == "apk":
+                    await _run_async(["apk", "add", "--no-cache", "--no-scripts", "yarn"], timeout=300)
+                else:
+                    await _run_async(["apt-get", "install", "-y", "yarn"], timeout=300)
+            except Exception as e:
+                print(f"[DEPLOY] Package manager yarn install failed ({e}), trying corepack …")
+                # corepack ships with Node.js v16+ and can activate yarn without a separate install
+                await _run_async([node_bin, "-e",
+                    "require('child_process').execFileSync(process.execPath,"
+                    " [require('path').join(require('path').dirname(process.execPath), 'corepack'),"
+                    " 'enable', 'yarn'], {stdio:'inherit'})"], timeout=120)
 
         # Pre-create node_modules and yarn cache dir.
         os.makedirs(os.path.join(app_dir, "node_modules"), exist_ok=True)
