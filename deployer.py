@@ -183,9 +183,12 @@ def delete_app(app_id: str) -> bool:
     reg = _load()
     app = reg["apps"].pop(app_id, None)
     _save(reg)
-    if app:
-        shutil.rmtree(app["app_dir"], ignore_errors=True)
-        _log_activity("delete", app_id, f"wiped {app['app_dir']}")
+    # Always wipe the app directory — even if the app wasn't in the registry
+    # (e.g. a failed deploy left the dir on disk without registering the app).
+    app_dir = app["app_dir"] if app else os.path.join(APPS_DIR, app_id)
+    if os.path.exists(app_dir):
+        shutil.rmtree(app_dir, ignore_errors=True)
+    _log_activity("delete", app_id, f"wiped {app_dir}")
     port_manager.release(app_id)
     return True
 
