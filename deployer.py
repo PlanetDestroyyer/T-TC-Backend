@@ -954,14 +954,15 @@ async def _install_deps(app_dir: str, app_type: str):
         if not os.path.exists(node_bin):
             print(f"[DEPLOY] Installing nodejs via {pkg_mgr} …")
             if pkg_mgr == "apk":
-                await _run_async(["apk", "add", "--no-cache", "--no-scripts", "nodejs"], timeout=300)
+                # No --no-scripts: nodejs needs install triggers to create symlinks/etc.
+                await _run_async(["apk", "add", "--no-cache", "nodejs"], timeout=300)
             else:
                 await _run_async(["apt-get", "install", "-y", "nodejs"], timeout=300)
         if not os.path.exists(yarn_bin):
             print(f"[DEPLOY] Installing yarn via {pkg_mgr} …")
             try:
                 if pkg_mgr == "apk":
-                    await _run_async(["apk", "add", "--no-cache", "--no-scripts", "yarn"], timeout=300)
+                    await _run_async(["apk", "add", "--no-cache", "yarn"], timeout=300)
                 else:
                     await _run_async(["apt-get", "install", "-y", "yarn"], timeout=300)
             except Exception as e:
