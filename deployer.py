@@ -827,6 +827,11 @@ process.argv = {argv_json};
 // Redirect npm cache to app dir — /root/.npm may not exist inside proot
 process.env.npm_config_cache = {npm_cache_json};
 process.env.HOME = {app_dir_json};
+// Disable io_uring: Node.js v20+ uses io_uring for async fs on modern kernels.
+// proot intercepts syscalls via ptrace but does NOT intercept io_uring operations,
+// so mkdir/open calls through io_uring bypass proot's translation layer entirely
+// and fail with ENOENT.  UV_USE_IO_URING=0 forces libuv back to classic syscalls.
+process.env.UV_USE_IO_URING = '0';
 
 // Force all fs.mkdir calls to use recursive:true.
 // Inside proot on Android, Node's recursive-mkdir walk fails when the CWD is
