@@ -988,15 +988,30 @@ async def _install_deps(app_dir: str, app_type: str):
         yarn_cache = os.path.join(app_dir, ".yarn-cache")
         os.makedirs(yarn_cache, exist_ok=True)
 
-        # Pre-create yarn config files so yarn's openSync() doesn't hit ENOSYS.
-        # proot returns ENOSYS for open() with certain flags on non-existent paths
-        # in /etc. Creating empty files first lets yarn read them normally.
-        for cfg in ["/etc/yarn", os.path.expanduser("~/.yarn")]:
-            os.makedirs(cfg, exist_ok=True)
-        for cfg in ["/etc/yarn/config", os.path.expanduser("~/.yarnrc"),
-                    os.path.join(app_dir, ".yarnrc")]:
-            if not os.path.exists(cfg):
-                open(cfg, "w").close()
+        # Pre-create ALL directories and files that yarn reads during startup.
+        # proot returns ENOSYS (not ENOENT) for fs calls on non-existent paths,
+        # crashing yarn. Creating them as empty files/dirs lets yarn proceed normally.
+        # Paths from yarn's parseRcPaths/findRc/getLinkRegistryPath:
+        for d in [
+            "/etc/yarn",
+            "/usr/local/etc",
+            "/usr/local/share/.config/yarn",
+            "/usr/local/share/.config/yarn/link",
+            os.path.expanduser("~/.config/yarn"),
+            os.path.expanduser("~/.config/yarn/link"),
+            os.path.expanduser("~/.yarn"),
+            os.path.expanduser("~/.yarn/link"),
+        ]:
+            os.makedirs(d, exist_ok=True)
+        for f in [
+            "/etc/yarn/config",
+            "/usr/local/etc/yarnrc",
+            os.path.expanduser("~/.yarnrc"),
+            os.path.expanduser("~/.config/yarn/config"),
+            os.path.join(app_dir, ".yarnrc"),
+        ]:
+            if not os.path.exists(f):
+                open(f, "w").close()
 
         # Use wrapper script to patch process.cwd (getcwd ENOSYS in proot).
         install_wrapper = _write_yarn_wrapper(app_dir, ["--cwd", app_dir, "--cache-folder", yarn_cache, "install", "--non-interactive"])
