@@ -873,10 +873,19 @@ def _write_yarn_wrapper(app_dir: str, yarn_args: list[str]) -> str:
     proot on Android (proot's ptrace syscall emulation is incomplete on ARM64).
     Yarn uses different fs code paths that work correctly in proot."""
     path = "/tmp/tc_yarn_wrap.js"
-    # Debian yarn CLI location
+    # Find yarn CLI — location differs by distro:
+    # Alpine: /usr/share/yarn/bin/yarn.js
+    # Debian: /usr/share/yarn/bin/yarn.js or /usr/lib/node_modules/yarn/bin/yarn.js
+    # Fallback: resolve from the yarn binary itself
     yarn_cli = "/usr/share/yarn/bin/yarn.js"
-    if not os.path.exists(yarn_cli):
-        yarn_cli = "/usr/lib/node_modules/yarn/bin/yarn.js"
+    for candidate in [
+        "/usr/share/yarn/bin/yarn.js",
+        "/usr/lib/node_modules/yarn/bin/yarn.js",
+        "/usr/local/lib/node_modules/yarn/bin/yarn.js",
+    ]:
+        if os.path.exists(candidate):
+            yarn_cli = candidate
+            break
     argv_json = json.dumps(["node", yarn_cli] + yarn_args)
     app_dir_json = json.dumps(app_dir)
     content = f"""\
@@ -917,18 +926,20 @@ async def _install_deps(app_dir: str, app_type: str):
         # (Confirmed fix: termux/proot-distro#548)
         node_bin = "/usr/bin/node"
         yarn_bin = "/usr/bin/yarn"
+        # Detect package manager: Alpine uses apk, Debian/Ubuntu uses apt-get
+        pkg_mgr = "apk" if os.path.exists("/sbin/apk") else "apt-get"
         if not os.path.exists(node_bin):
-            print("[DEPLOY] Installing nodejs …")
-            await _run_async(
-                ["apt-get", "install", "-y", "nodejs"],
-                timeout=300,
-            )
+            print(f"[DEPLOY] Installing nodejs via {pkg_mgr} …")
+            if pkg_mgr == "apk":
+                await _run_async(["apk", "add", "--no-cache", "--no-scripts", "nodejs"], timeout=300)
+            else:
+                await _run_async(["apt-get", "install", "-y", "nodejs"], timeout=300)
         if not os.path.exists(yarn_bin):
-            print("[DEPLOY] Installing yarn …")
-            await _run_async(
-                ["apt-get", "install", "-y", "yarn"],
-                timeout=300,
-            )
+            print(f"[DEPLOY] Installing yarn via {pkg_mgr} …")
+            if pkg_mgr == "apk":
+                await _run_async(["apk", "add", "--no-cache", "--no-scripts", "yarn"], timeout=300)
+            else:
+                await _run_async(["apt-get", "install", "-y", "yarn"], timeout=300)
 
         # Pre-create node_modules and yarn cache dir.
         os.makedirs(os.path.join(app_dir, "node_modules"), exist_ok=True)
