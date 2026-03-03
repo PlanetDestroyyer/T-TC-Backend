@@ -918,24 +918,31 @@ process.chdir = () => {{}};
 process.argv = {argv_json};
 process.env.HOME = {app_dir_json};
 
-// proot returns ENOSYS instead of ENOENT for openSync() on non-existent paths.
-// Yarn calls openSync() on multiple config paths at startup (parseRcPaths/findRc)
-// and expects ENOENT when they're missing. ENOSYS causes an unhandled crash.
-// Patch openSync to convert ENOSYS -> ENOENT so yarn handles it gracefully.
+// proot returns ENOSYS instead of ENOENT for fs calls on non-existent paths.
+// Yarn calls openSync/readdirSync/statSync on config paths and expects ENOENT.
+// Patch all sync fs ops to convert ENOSYS -> ENOENT so yarn handles gracefully.
 const _fs = require('fs');
-const _origOpenSync = _fs.openSync.bind(_fs);
-_fs.openSync = function(path, flags, mode) {{
-  try {{
-    return _origOpenSync(path, flags, mode);
-  }} catch(e) {{
-    if (e && e.code === 'ENOSYS') {{
-      const err = new Error('ENOENT: no such file or directory, open \\'' + path + '\\'');
-      err.code = 'ENOENT'; err.syscall = 'open'; err.path = path;
-      throw err;
+function _wrapSync(orig, syscall) {{
+  return function(...args) {{
+    try {{ return orig(...args); }}
+    catch(e) {{
+      if (e && e.code === 'ENOSYS') {{
+        const p = typeof args[0] === 'string' ? args[0] : String(args[0]);
+        const err = Object.assign(new Error('ENOENT: no such file or directory, ' + syscall + " '" + p + "'"),
+          {{code:'ENOENT', syscall, path:p}});
+        throw err;
+      }}
+      throw e;
     }}
-    throw e;
-  }}
-}};
+  }};
+}}
+_fs.openSync       = _wrapSync(_fs.openSync.bind(_fs),       'open');
+_fs.readdirSync    = _wrapSync(_fs.readdirSync.bind(_fs),    'scandir');
+_fs.statSync       = _wrapSync(_fs.statSync.bind(_fs),       'stat');
+_fs.lstatSync      = _wrapSync(_fs.lstatSync.bind(_fs),      'lstat');
+_fs.accessSync     = _wrapSync(_fs.accessSync.bind(_fs),     'access');
+_fs.readFileSync   = _wrapSync(_fs.readFileSync.bind(_fs),   'open');
+_fs.opendirSync    = _wrapSync(_fs.opendirSync.bind(_fs),    'scandir');
 
 require({json.dumps(yarn_cli)});
 """
