@@ -1014,8 +1014,23 @@ async def _install_deps(app_dir: str, app_type: str):
                 open(f, "w").close()
 
         # Use wrapper script to patch process.cwd (getcwd ENOSYS in proot).
-        install_wrapper = _write_yarn_wrapper(app_dir, ["--cwd", app_dir, "--cache-folder", yarn_cache, "install", "--non-interactive"])
+        # --global-folder: redirect yarn's global link registry away from
+        # /usr/local/share/.config/yarn (which scandir returns ENOSYS on in proot)
+        # to our app's cache dir which we own and is fully writable.
+        yarn_global = os.path.join(app_dir, ".yarn-global")
+        os.makedirs(os.path.join(yarn_global, "link"), exist_ok=True)
+        install_wrapper = _write_yarn_wrapper(app_dir, [
+            "--cwd", app_dir,
+            "--cache-folder", yarn_cache,
+            "--global-folder", yarn_global,
+            "--non-interactive",
+            "install",
+        ])
         await _run_async([node_bin, install_wrapper], timeout=900)
 
-        build_wrapper = _write_yarn_wrapper(app_dir, ["--cwd", app_dir, "build"])
+        build_wrapper = _write_yarn_wrapper(app_dir, [
+            "--cwd", app_dir,
+            "--global-folder", yarn_global,
+            "build",
+        ])
         await _run_async([node_bin, build_wrapper], timeout=900)
