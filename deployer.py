@@ -977,6 +977,16 @@ async def _install_deps(app_dir: str, app_type: str):
         yarn_cache = os.path.join(app_dir, ".yarn-cache")
         os.makedirs(yarn_cache, exist_ok=True)
 
+        # Pre-create yarn config files so yarn's openSync() doesn't hit ENOSYS.
+        # proot returns ENOSYS for open() with certain flags on non-existent paths
+        # in /etc. Creating empty files first lets yarn read them normally.
+        for cfg in ["/etc/yarn", os.path.expanduser("~/.yarn")]:
+            os.makedirs(cfg, exist_ok=True)
+        for cfg in ["/etc/yarn/config", os.path.expanduser("~/.yarnrc"),
+                    os.path.join(app_dir, ".yarnrc")]:
+            if not os.path.exists(cfg):
+                open(cfg, "w").close()
+
         # Use wrapper script to patch process.cwd (getcwd ENOSYS in proot).
         install_wrapper = _write_yarn_wrapper(app_dir, ["--cwd", app_dir, "--cache-folder", yarn_cache, "install", "--non-interactive"])
         await _run_async([node_bin, install_wrapper], timeout=900)
