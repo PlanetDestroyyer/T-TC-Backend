@@ -880,15 +880,34 @@ def _write_yarn_wrapper(app_dir: str, yarn_args: list[str]) -> str:
     # Alpine: /usr/share/yarn/bin/yarn.js
     # Debian: /usr/share/yarn/bin/yarn.js or /usr/lib/node_modules/yarn/bin/yarn.js
     # Fallback: resolve from the yarn binary itself
-    yarn_cli = "/usr/share/yarn/bin/yarn.js"
+    # Find yarn CLI dynamically — location varies by distro and install method.
+    # Try known paths first, then resolve by reading the yarn shebang wrapper.
+    yarn_cli = None
     for candidate in [
         "/usr/share/yarn/bin/yarn.js",
         "/usr/lib/node_modules/yarn/bin/yarn.js",
         "/usr/local/lib/node_modules/yarn/bin/yarn.js",
+        "/opt/yarn/bin/yarn.js",
     ]:
         if os.path.exists(candidate):
             yarn_cli = candidate
             break
+    if not yarn_cli:
+        # Read /usr/bin/yarn to find the real JS path (it's usually a shell wrapper
+        # like: exec node /real/path/to/yarn.js "$@")
+        import subprocess, shutil
+        ybin = shutil.which("yarn")
+        if ybin:
+            try:
+                content = open(ybin).read()
+                import re
+                m = re.search(r'node\s+([^\s"\']+yarn[^\s"\']*\.js)', content)
+                if m:
+                    yarn_cli = m.group(1)
+            except Exception:
+                pass
+    if not yarn_cli:
+        raise RuntimeError("Cannot locate yarn CLI (yarn.js). Is yarn installed?")
     argv_json = json.dumps(["node", yarn_cli] + yarn_args)
     app_dir_json = json.dumps(app_dir)
     content = f"""\
