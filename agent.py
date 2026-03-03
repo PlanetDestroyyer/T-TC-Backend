@@ -615,6 +615,28 @@ def debug_ssh_setup():
     return results
 
 
+@app.get("/debug/yarn")
+def debug_yarn():
+    import subprocess, shutil, glob
+    r = {}
+    r["yarn_which"] = shutil.which("yarn")
+    # Read /usr/bin/yarn content to find the JS path
+    ybin = shutil.which("yarn") or "/usr/bin/yarn"
+    if os.path.exists(ybin):
+        try:
+            r["yarn_bin_content"] = open(ybin).read()[:500]
+        except Exception as e:
+            r["yarn_bin_read_error"] = str(e)
+    # Find yarn.js anywhere on filesystem
+    result = subprocess.run(["find", "/usr", "-name", "yarn.js", "-maxdepth", "8"],
+                            capture_output=True, text=True, timeout=10)
+    r["find_yarn_js"] = result.stdout.strip()
+    # List /usr/lib/node_modules
+    r["node_modules_dir"] = subprocess.run(["ls", "/usr/lib/node_modules"],
+                                            capture_output=True, text=True).stdout.strip()
+    return r
+
+
 @app.get("/debug/npm")
 def debug_npm():
     import subprocess, shutil
