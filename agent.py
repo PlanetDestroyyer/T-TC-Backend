@@ -615,6 +615,51 @@ def debug_ssh_setup():
     return results
 
 
+@app.get("/debug/npm")
+def debug_npm():
+    import subprocess, shutil
+    r = {}
+    # Node/npm versions
+    for bin in ["node", "npm"]:
+        p = shutil.which(bin)
+        r[bin] = p
+        if p:
+            out = subprocess.run([p, "--version"], capture_output=True, text=True)
+            r[f"{bin}_version"] = out.stdout.strip()
+    # Check if node_modules pre-creation worked
+    app_dir = "/root/apps/tinycell-test-react"
+    nm = f"{app_dir}/node_modules"
+    r["node_modules_exists"] = os.path.isdir(nm)
+    # Try Python mkdir for @adobe
+    test_dir = f"{nm}/@adobe-test/pkg"
+    try:
+        os.makedirs(test_dir, exist_ok=True)
+        r["python_makedirs_ok"] = True
+        shutil.rmtree(f"{nm}/@adobe-test")
+    except Exception as e:
+        r["python_makedirs_ok"] = str(e)
+    # Read latest npm log
+    import glob
+    logs_dir = f"{app_dir}/.npm-cache/_logs"
+    logs = sorted(glob.glob(f"{logs_dir}/*.log"))
+    if logs:
+        try:
+            with open(logs[-1]) as f:
+                lines = f.readlines()
+            # Find the error section
+            err_lines = [l for l in lines if "mkdir" in l or "ENOENT" in l or "stack" in l.lower()]
+            r["npm_log_excerpt"] = "".join(err_lines[-30:])
+        except Exception as e:
+            r["npm_log_error"] = str(e)
+    # Check npm wrapper script
+    if os.path.exists("/tmp/tc_npm_wrap.js"):
+        with open("/tmp/tc_npm_wrap.js") as f:
+            r["wrapper_has_mkdirSync_patch"] = "mkdirSync" in f.read()
+    else:
+        r["wrapper_exists"] = False
+    return r
+
+
 @app.get("/scan")
 def scan_hardware():
     cpu_info = run_command("cat /proc/cpuinfo")
