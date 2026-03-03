@@ -654,7 +654,10 @@ def debug_npm():
     # Check npm wrapper script
     if os.path.exists("/tmp/tc_npm_wrap.js"):
         with open("/tmp/tc_npm_wrap.js") as f:
-            r["wrapper_has_mkdirSync_patch"] = "mkdirSync" in f.read()
+            content = f.read()
+        r["wrapper_has_mkdirSync_patch"] = "mkdirSync" in content
+        r["wrapper_has_io_uring_fix"] = "UV_USE_IO_URING" in content
+        r["wrapper_snippet"] = content[:400]
     else:
         r["wrapper_exists"] = False
     return r

@@ -730,12 +730,16 @@ async def _update_repo(repo_url: str, dest_dir: str):
 async def _run_async(cmd: list[str], timeout: int = 120) -> str:
     """Run a command asynchronously. All paths must be absolute — never use shell cd
     (busybox cd calls fchdir() which proot does not implement on ARM64 → ENOSYS)."""
-    env = None
+    # UV_USE_IO_URING=0 — libuv reads this at startup (not dynamically), so it must
+    # be in the process environment before Node.js initializes, not set via JS.
+    # proot intercepts syscalls via ptrace but NOT io_uring ring submissions, so
+    # async fs ops (mkdir, open, …) through io_uring bypass proot and return ENOENT.
+    env = {**os.environ, "UV_USE_IO_URING": "0"}
     if cmd and cmd[0] == "git":
         git_cfg = os.path.expanduser("~/.config/git")
         os.makedirs(git_cfg, exist_ok=True)
         open(os.path.join(git_cfg, "config"), "a").close()
-        env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
+        env = {**env, "GIT_CONFIG_NOSYSTEM": "1", "HOME": "/root"}
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -827,12 +831,6 @@ process.argv = {argv_json};
 // Redirect npm cache to app dir — /root/.npm may not exist inside proot
 process.env.npm_config_cache = {npm_cache_json};
 process.env.HOME = {app_dir_json};
-// Disable io_uring: Node.js v20+ uses io_uring for async fs on modern kernels.
-// proot intercepts syscalls via ptrace but does NOT intercept io_uring operations,
-// so mkdir/open calls through io_uring bypass proot's translation layer entirely
-// and fail with ENOENT.  UV_USE_IO_URING=0 forces libuv back to classic syscalls.
-process.env.UV_USE_IO_URING = '0';
-
 // Force all fs.mkdir calls to use recursive:true.
 // Inside proot on Android, Node's recursive-mkdir walk fails when the CWD is
 // corrupted (getcwd ENOSYS after apk runs).  npm calls mkdir for nested paths
