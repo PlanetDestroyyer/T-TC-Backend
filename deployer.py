@@ -867,6 +867,31 @@ require({json.dumps(npm_cli)});
     return path
 
 
+def _write_yarn_wrapper(app_dir: str, yarn_args: list[str]) -> str:
+    """Write a Node.js wrapper that patches process.cwd then runs yarn-cli.js.
+    Yarn is used instead of npm because npm's internal mkdir calls fail inside
+    proot on Android (proot's ptrace syscall emulation is incomplete on ARM64).
+    Yarn uses different fs code paths that work correctly in proot."""
+    path = "/tmp/tc_yarn_wrap.js"
+    # Debian yarn CLI location
+    yarn_cli = "/usr/share/yarn/bin/yarn.js"
+    if not os.path.exists(yarn_cli):
+        yarn_cli = "/usr/lib/node_modules/yarn/bin/yarn.js"
+    argv_json = json.dumps(["node", yarn_cli] + yarn_args)
+    app_dir_json = json.dumps(app_dir)
+    content = f"""\
+// TinyCell yarn wrapper — patches process.cwd before yarn bootstrap
+process.cwd = () => {app_dir_json};
+process.chdir = () => {{}};
+process.argv = {argv_json};
+process.env.HOME = {app_dir_json};
+require({json.dumps(yarn_cli)});
+"""
+    with open(path, "w") as f:
+        f.write(content)
+    return path
+
+
 async def _install_deps(app_dir: str, app_type: str):
     if app_type in ("flask", "fastapi"):
         # Install to per-app .packages/ via a getcwd-patched pip wrapper.
@@ -885,30 +910,34 @@ async def _install_deps(app_dir: str, app_type: str):
                     except OSError: pass
 
     elif app_type == "react":
-        # Ensure nodejs/npm are installed (not present in Alpine by default).
+        # Ensure nodejs + yarn are installed.
+        # We use Yarn instead of npm: npm's internal mkdir calls fail inside proot
+        # due to proot's incomplete ptrace-based syscall emulation on ARM64 Android.
+        # Yarn uses different internal fs code paths that work correctly in proot.
+        # (Confirmed fix: termux/proot-distro#548)
         node_bin = "/usr/bin/node"
+        yarn_bin = "/usr/bin/yarn"
         if not os.path.exists(node_bin):
-            print("[DEPLOY] Installing nodejs + npm via apk …")
+            print("[DEPLOY] Installing nodejs …")
             await _run_async(
-                ["apk", "add", "--no-cache", "--no-scripts", "nodejs", "npm"],
+                ["apt-get", "install", "-y", "nodejs"],
+                timeout=300,
+            )
+        if not os.path.exists(yarn_bin):
+            print("[DEPLOY] Installing yarn …")
+            await _run_async(
+                ["apt-get", "install", "-y", "yarn"],
                 timeout=300,
             )
 
-        # Use wrapper script as main entry point (NOT --require) to avoid getcwd ENOSYS.
-        # See _write_npm_wrapper() for full explanation.
-        # We serve the built output with Python http.server (no `serve` package needed at runtime).
-        # Pre-create npm cache dirs — npm's cacache does a non-recursive mkdir on _cacache/tmp
-        # and fails if the parent (.npm-cache) doesn't already exist.
-        npm_cache = os.path.join(app_dir, ".npm-cache")
-        os.makedirs(os.path.join(npm_cache, "_cacache", "tmp"), exist_ok=True)
-        os.makedirs(os.path.join(npm_cache, "_logs"), exist_ok=True)
-        # Pre-create node_modules so npm only needs to create subdirs (not the root dir).
-        # Inside proot, npm's first mkdir for node_modules can fail if proot's CWD state
-        # is corrupt — pre-creating it guarantees the parent always exists.
+        # Pre-create node_modules and yarn cache dir.
         os.makedirs(os.path.join(app_dir, "node_modules"), exist_ok=True)
+        yarn_cache = os.path.join(app_dir, ".yarn-cache")
+        os.makedirs(yarn_cache, exist_ok=True)
 
-        install_wrapper = _write_npm_wrapper(app_dir, ["--prefix", app_dir, "install"])
+        # Use wrapper script to patch process.cwd (getcwd ENOSYS in proot).
+        install_wrapper = _write_yarn_wrapper(app_dir, ["--cwd", app_dir, "--cache-folder", yarn_cache, "install", "--non-interactive"])
         await _run_async([node_bin, install_wrapper], timeout=900)
 
-        build_wrapper = _write_npm_wrapper(app_dir, ["--prefix", app_dir, "run", "build"])
+        build_wrapper = _write_yarn_wrapper(app_dir, ["--cwd", app_dir, "build"])
         await _run_async([node_bin, build_wrapper], timeout=900)
