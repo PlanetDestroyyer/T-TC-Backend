@@ -884,7 +884,8 @@ def _write_yarn_wrapper(app_dir: str, yarn_args: list[str]) -> str:
     # Try known paths first, then resolve by reading the yarn shebang wrapper.
     yarn_cli = None
     for candidate in [
-        "/usr/share/yarn/bin/yarn.js",
+        "/usr/share/node_modules/yarn/bin/yarn.js",  # Alpine
+        "/usr/share/yarn/bin/yarn.js",               # Debian
         "/usr/lib/node_modules/yarn/bin/yarn.js",
         "/usr/local/lib/node_modules/yarn/bin/yarn.js",
         "/opt/yarn/bin/yarn.js",
