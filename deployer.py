@@ -954,24 +954,34 @@ async def _install_deps(app_dir: str, app_type: str):
         if not os.path.exists(node_bin):
             print(f"[DEPLOY] Installing nodejs via {pkg_mgr} …")
             if pkg_mgr == "apk":
-                # No --no-scripts: nodejs needs install triggers to create symlinks/etc.
-                await _run_async(["apk", "add", "--no-cache", "nodejs"], timeout=300)
+                # apk post-install scripts fail with fchdir ENOSYS inside proot, but
+                # the package files ARE extracted. Ignore exit code, check binary exists.
+                try:
+                    await _run_async(["apk", "add", "--no-cache", "nodejs"], timeout=300)
+                except Exception:
+                    pass
+                if not os.path.exists(node_bin):
+                    raise RuntimeError("nodejs install failed — binary not found after apk add")
             else:
                 await _run_async(["apt-get", "install", "-y", "nodejs"], timeout=300)
         if not os.path.exists(yarn_bin):
             print(f"[DEPLOY] Installing yarn via {pkg_mgr} …")
-            try:
-                if pkg_mgr == "apk":
+            if pkg_mgr == "apk":
+                try:
                     await _run_async(["apk", "add", "--no-cache", "yarn"], timeout=300)
-                else:
+                except Exception:
+                    pass
+                if not os.path.exists(yarn_bin):
+                    raise RuntimeError("yarn install failed — binary not found after apk add")
+            else:
+                try:
                     await _run_async(["apt-get", "install", "-y", "yarn"], timeout=300)
-            except Exception as e:
-                print(f"[DEPLOY] Package manager yarn install failed ({e}), trying corepack …")
-                # corepack ships with Node.js v16+ and can activate yarn without a separate install
-                await _run_async([node_bin, "-e",
-                    "require('child_process').execFileSync(process.execPath,"
-                    " [require('path').join(require('path').dirname(process.execPath), 'corepack'),"
-                    " 'enable', 'yarn'], {stdio:'inherit'})"], timeout=120)
+                except Exception as e:
+                    print(f"[DEPLOY] apt yarn failed ({e}), trying corepack …")
+                    await _run_async([node_bin, "-e",
+                        "require('child_process').execFileSync(process.execPath,"
+                        " [require('path').join(require('path').dirname(process.execPath), 'corepack'),"
+                        " 'enable', 'yarn'], {stdio:'inherit'})"], timeout=120)
 
         # Pre-create node_modules and yarn cache dir.
         os.makedirs(os.path.join(app_dir, "node_modules"), exist_ok=True)
