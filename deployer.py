@@ -843,6 +843,16 @@ _fs.mkdir = function(p, o, cb) {{
 }};
 const _opmp = _fs.promises.mkdir.bind(_fs.promises);
 _fs.promises.mkdir = (p, o) => _opmp(p, {{ ...(o || {{}}), recursive: true }});
+const _omks = _fs.mkdirSync.bind(_fs);
+_fs.mkdirSync = function(p, o) {{
+  if (typeof o === 'number') o = {{ mode: o }};
+  return _omks(p, {{ ...(o || {{}}), recursive: true }});
+}};
+try {{
+  const _fsp = require('fs/promises');
+  const _opmp2 = _fsp.mkdir.bind(_fsp);
+  _fsp.mkdir = (p, o) => _opmp2(p, {{ ...(o || {{}}), recursive: true }});
+}} catch (e) {{}}
 
 require({json.dumps(npm_cli)});
 """
