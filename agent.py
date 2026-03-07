@@ -1317,49 +1317,77 @@ def ai_install_status():
 
 
 async def _run_ollama_install():
+    import tarfile as _tarfile
     global _install_state
-    arch = platform.machine()  # aarch64, x86_64, armv7l
+    arch = platform.machine()
     arch_map = {"aarch64": "arm64", "x86_64": "amd64", "armv7l": "arm"}
     bin_arch = arch_map.get(arch, "arm64")
-    # GitHub releases redirect to R2/CDN — follow redirects
-    url = f"https://github.com/ollama/ollama/releases/latest/download/ollama-linux-{bin_arch}"
-    _install_state["log"].append(f"Arch: {arch} → {bin_arch}")
-    _install_state["log"].append(f"Downloading Ollama binary (~50 MB)…")
 
-    def do_download():
+    # ollama.com CDN provides .tgz which Python tarfile handles natively (no zstd needed).
+    # Falls back to GitHub .tar.zst only if .tgz returns 404.
+    tgz_url  = f"https://ollama.com/download/ollama-linux-{bin_arch}.tgz"
+    _install_state["log"].append(f"Arch: {arch} → {bin_arch}")
+    _install_state["log"].append("Downloading Ollama (~50 MB)…")
+
+    def do_install():
+        import tempfile
         os.makedirs(os.path.dirname(OLLAMA_BIN), exist_ok=True)
-        tmp = OLLAMA_BIN + ".tmp"
+        tmp_tgz = os.path.join(tempfile.gettempdir(), f"ollama-{bin_arch}.tgz")
+
+        # ── 1. Download ───────────────────────────────────────────────────────
+        with _urllib_req.urlopen(tgz_url, timeout=300) as resp:
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            last_pct = -1
+            with open(tmp_tgz, "wb") as f:
+                while True:
+                    buf = resp.read(1 << 18)  # 256 KB
+                    if not buf:
+                        break
+                    f.write(buf)
+                    downloaded += len(buf)
+                    if total:
+                        pct = int(downloaded * 100 / total)
+                        if pct != last_pct and pct % 5 == 0:
+                            _install_state["log"].append(
+                                f"  {pct}% — {downloaded >> 20} MB / {total >> 20} MB"
+                            )
+                            last_pct = pct
+
+        # ── 2. Extract bin/ollama from .tgz ──────────────────────────────────
+        _install_state["log"].append("Extracting…")
+        with _tarfile.open(tmp_tgz, "r:gz") as tar:
+            # The archive contains bin/ollama (inside /usr/local layout)
+            target = None
+            for member in tar.getmembers():
+                name = member.name.lstrip("./")
+                if name in ("bin/ollama", "ollama") or name.endswith("/ollama"):
+                    target = member
+                    break
+            if target is None:
+                raise RuntimeError(
+                    f"ollama binary not found in archive. Members: "
+                    + ", ".join(m.name for m in tar.getmembers()[:10])
+                )
+            f = tar.extractfile(target)
+            if f is None:
+                raise RuntimeError("Could not read ollama binary from archive")
+            with open(OLLAMA_BIN, "wb") as out:
+                out.write(f.read())
+
+        os.chmod(OLLAMA_BIN, 0o755)
         try:
-            # urllib follows redirects automatically; no curl/wget needed
-            with _urllib_req.urlopen(url, timeout=120) as resp:
-                total = int(resp.headers.get("Content-Length", 0))
-                downloaded = 0
-                chunk = 1 << 18  # 256 KB
-                with open(tmp, "wb") as f:
-                    while True:
-                        buf = resp.read(chunk)
-                        if not buf:
-                            break
-                        f.write(buf)
-                        downloaded += len(buf)
-                        if total:
-                            pct = int(downloaded * 100 / total)
-                            mb = downloaded // (1 << 20)
-                            _install_state["log"].append(f"  {pct}% ({mb} MB)")
-            os.rename(tmp, OLLAMA_BIN)
-            os.chmod(OLLAMA_BIN, 0o755)
-        except Exception:
-            try: os.remove(tmp)
-            except OSError: pass
-            raise
+            os.remove(tmp_tgz)
+        except OSError:
+            pass
 
     try:
-        await asyncio.get_event_loop().run_in_executor(None, do_download)
+        await asyncio.get_event_loop().run_in_executor(None, do_install)
         if _ollama_installed():
             _install_state["log"].append("✅ Ollama installed successfully")
             _install_state["done"] = True
         else:
-            _install_state["error"] = "Binary missing after download — check storage space"
+            _install_state["error"] = "Binary missing after install — check storage space"
     except Exception as e:
         _install_state["error"] = str(e)
     finally:
