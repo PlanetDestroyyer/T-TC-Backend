@@ -1351,7 +1351,6 @@ async def _run_ollama_install():
         import subprocess as _sp, tempfile as _tmp
         os.makedirs(os.path.dirname(OLLAMA_BIN), exist_ok=True)
         tmp_zst = os.path.join(_tmp.gettempdir(), f"ollama-{bin_arch}.tar.zst")
-        extract_dir = os.path.join(_tmp.gettempdir(), f"ollama_extract_{bin_arch}")
 
         # ── 1. Download ───────────────────────────────────────────────────────
         with _urllib_req.urlopen(zst_url, timeout=300) as resp:
@@ -1379,43 +1378,35 @@ async def _run_ollama_install():
             _install_state["log"].append("Installing zstd…")
             _sp.run(["apk", "add", "--no-cache", "zstd"], capture_output=True)
 
-        # ── 3. Decompress .tar.zst → extract bin/ollama ──────────────────────
-        _install_state["log"].append("Extracting…")
-        os.makedirs(extract_dir, exist_ok=True)
-        result = _sp.run(
-            f"zstd -d -c {tmp_zst} | tar -x -C {extract_dir}",
-            shell=True, capture_output=True
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Extraction failed: {result.stderr.decode(errors='replace')[:200]}")
+        # ── 3. Stream zstd → Python tarfile (no chdir, no temp .tar file) ────
+        # tar -C uses chdir() which returns ENOSYS in proot — avoid entirely.
+        # Instead: pipe zstd stdout into Python's tarfile in streaming mode.
+        _install_state["log"].append("Extracting ollama binary…")
+        import tarfile as _tarfile
+        zstd_proc = _sp.Popen(["zstd", "-d", "-c", tmp_zst], stdout=_sp.PIPE)
+        found = False
+        try:
+            with _tarfile.open(fileobj=zstd_proc.stdout, mode="r|") as tar:
+                for member in tar:
+                    name = member.name.lstrip("./")
+                    if (name in ("bin/ollama", "ollama") or name.endswith("/ollama")) and member.isfile():
+                        src = tar.extractfile(member)
+                        with open(OLLAMA_BIN, "wb") as out:
+                            out.write(src.read())
+                        found = True
+                        break
+        finally:
+            zstd_proc.kill()
+            zstd_proc.wait()
 
-        # Find the ollama binary in the extracted dir
-        found = None
-        for root, dirs, files in os.walk(extract_dir):
-            if "ollama" in files:
-                candidate = os.path.join(root, "ollama")
-                if os.path.isfile(candidate):
-                    found = candidate
-                    break
         if not found:
-            listing = []
-            for root, dirs, files in os.walk(extract_dir):
-                listing += [os.path.join(root, f) for f in files]
-            raise RuntimeError(f"ollama binary not found. Files: {listing[:10]}")
+            raise RuntimeError("ollama binary not found in archive")
 
-        import shutil as _shutil2
-        _shutil2.copy2(found, OLLAMA_BIN)
         os.chmod(OLLAMA_BIN, 0o755)
-
-        # Cleanup
-        for p in (tmp_zst, extract_dir):
-            try:
-                if os.path.isfile(p):
-                    os.remove(p)
-                elif os.path.isdir(p):
-                    _shutil2.rmtree(p)
-            except OSError:
-                pass
+        try:
+            os.remove(tmp_zst)
+        except OSError:
+            pass
 
     try:
         await asyncio.get_event_loop().run_in_executor(None, do_install)
