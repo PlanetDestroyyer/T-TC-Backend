@@ -685,6 +685,26 @@ def debug_npm():
     return r
 
 
+class _ExecReq(BaseModel):
+    cmd: str
+    timeout: int = 30
+
+@app.post("/debug/exec")
+async def debug_exec(req: _ExecReq):
+    """Run a shell command inside the proot environment. Returns stdout+stderr and exit code."""
+    proc = await asyncio.create_subprocess_shell(
+        req.cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=float(req.timeout))
+    except asyncio.TimeoutError:
+        proc.kill()
+        return {"output": "Timed out", "exit_code": -1}
+    return {"output": stdout.decode(errors="replace"), "exit_code": proc.returncode}
+
+
 @app.get("/scan")
 def scan_hardware():
     cpu_info = run_command("cat /proc/cpuinfo")
