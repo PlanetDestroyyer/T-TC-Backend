@@ -1321,24 +1321,45 @@ async def _run_ollama_install():
     arch = platform.machine()  # aarch64, x86_64, armv7l
     arch_map = {"aarch64": "arm64", "x86_64": "amd64", "armv7l": "arm"}
     bin_arch = arch_map.get(arch, "arm64")
+    # GitHub releases redirect to R2/CDN — follow redirects
     url = f"https://github.com/ollama/ollama/releases/latest/download/ollama-linux-{bin_arch}"
-    _install_state["log"].append(f"Detected arch: {arch} → downloading {bin_arch} binary…")
+    _install_state["log"].append(f"Arch: {arch} → {bin_arch}")
+    _install_state["log"].append(f"Downloading Ollama binary (~50 MB)…")
+
+    def do_download():
+        os.makedirs(os.path.dirname(OLLAMA_BIN), exist_ok=True)
+        tmp = OLLAMA_BIN + ".tmp"
+        try:
+            # urllib follows redirects automatically; no curl/wget needed
+            with _urllib_req.urlopen(url, timeout=120) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
+                chunk = 1 << 18  # 256 KB
+                with open(tmp, "wb") as f:
+                    while True:
+                        buf = resp.read(chunk)
+                        if not buf:
+                            break
+                        f.write(buf)
+                        downloaded += len(buf)
+                        if total:
+                            pct = int(downloaded * 100 / total)
+                            mb = downloaded // (1 << 20)
+                            _install_state["log"].append(f"  {pct}% ({mb} MB)")
+            os.rename(tmp, OLLAMA_BIN)
+            os.chmod(OLLAMA_BIN, 0o755)
+        except Exception:
+            try: os.remove(tmp)
+            except OSError: pass
+            raise
+
     try:
-        proc = await asyncio.create_subprocess_shell(
-            f'curl -fL "{url}" -o "{OLLAMA_BIN}" && chmod +x "{OLLAMA_BIN}"',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        async for line in proc.stdout:
-            stripped = line.decode(errors="replace").strip()
-            if stripped:
-                _install_state["log"].append(stripped)
-        await proc.wait()
-        if proc.returncode == 0 and _ollama_installed():
+        await asyncio.get_event_loop().run_in_executor(None, do_download)
+        if _ollama_installed():
             _install_state["log"].append("✅ Ollama installed successfully")
             _install_state["done"] = True
         else:
-            _install_state["error"] = f"Install failed (exit {proc.returncode})"
+            _install_state["error"] = "Binary missing after download — check storage space"
     except Exception as e:
         _install_state["error"] = str(e)
     finally:
