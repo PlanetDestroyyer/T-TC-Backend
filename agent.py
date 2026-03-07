@@ -1247,6 +1247,213 @@ def run_https_server():
     else:
         print("⚠️  No SSL certs - HTTPS disabled. Browser access unavailable.")
 
+# ─── AI / Ollama ──────────────────────────────────────────────────────────────
+
+import urllib.request as _urllib_req
+
+OLLAMA_BASE = "http://localhost:11434"
+OLLAMA_BIN  = "/usr/local/bin/ollama"
+
+_ollama_proc: "subprocess.Popen | None" = None
+_install_state: dict = {"running": False, "done": False, "log": [], "error": None}
+_pull_state: dict = {}  # keyed by model name
+
+
+def _ollama_running() -> bool:
+    try:
+        _urllib_req.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def _ollama_installed() -> bool:
+    return os.path.isfile(OLLAMA_BIN) and os.access(OLLAMA_BIN, os.X_OK)
+
+
+class _AiMsg(BaseModel):
+    role: str     # "user" | "assistant" | "system"
+    content: str
+
+
+class _AiChatReq(BaseModel):
+    model: str = "qwen3.5:0.8b"
+    messages: list[_AiMsg]
+
+
+class _PullReq(BaseModel):
+    model: str = "qwen3.5:0.8b"
+
+
+@app.get("/ai/status")
+def ai_status():
+    installed = _ollama_installed()
+    running   = _ollama_running() if installed else False
+    models: list[str] = []
+    if running:
+        try:
+            with _urllib_req.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=3) as r:
+                models = [m["name"] for m in json.loads(r.read()).get("models", [])]
+        except Exception:
+            pass
+    return {"installed": installed, "running": running, "models": models}
+
+
+@app.post("/ai/install")
+async def ai_install():
+    global _install_state
+    if _install_state["running"]:
+        return _install_state
+    if _ollama_installed():
+        return {"running": False, "done": True, "log": ["Ollama already installed"], "error": None}
+    _install_state = {"running": True, "done": False, "log": [], "error": None}
+    asyncio.create_task(_run_ollama_install())
+    return _install_state
+
+
+@app.get("/ai/install/status")
+def ai_install_status():
+    return _install_state
+
+
+async def _run_ollama_install():
+    global _install_state
+    arch = platform.machine()  # aarch64, x86_64, armv7l
+    arch_map = {"aarch64": "arm64", "x86_64": "amd64", "armv7l": "arm"}
+    bin_arch = arch_map.get(arch, "arm64")
+    url = f"https://github.com/ollama/ollama/releases/latest/download/ollama-linux-{bin_arch}"
+    _install_state["log"].append(f"Detected arch: {arch} → downloading {bin_arch} binary…")
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            f'curl -fL "{url}" -o "{OLLAMA_BIN}" && chmod +x "{OLLAMA_BIN}"',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        async for line in proc.stdout:
+            stripped = line.decode(errors="replace").strip()
+            if stripped:
+                _install_state["log"].append(stripped)
+        await proc.wait()
+        if proc.returncode == 0 and _ollama_installed():
+            _install_state["log"].append("✅ Ollama installed successfully")
+            _install_state["done"] = True
+        else:
+            _install_state["error"] = f"Install failed (exit {proc.returncode})"
+    except Exception as e:
+        _install_state["error"] = str(e)
+    finally:
+        _install_state["running"] = False
+
+
+@app.post("/ai/start")
+async def ai_start():
+    global _ollama_proc
+    if _ollama_running():
+        return {"running": True}
+    if not _ollama_installed():
+        return JSONResponse(status_code=503, content={"error": "Ollama not installed"})
+    _ollama_proc = subprocess.Popen(
+        [OLLAMA_BIN, "serve"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    for _ in range(20):          # wait up to 10 s
+        await asyncio.sleep(0.5)
+        if _ollama_running():
+            return {"running": True}
+    return JSONResponse(status_code=503, content={"error": "Ollama did not respond in time"})
+
+
+@app.post("/ai/stop")
+def ai_stop():
+    global _ollama_proc
+    if _ollama_proc:
+        try:
+            _ollama_proc.terminate()
+        except Exception:
+            pass
+        _ollama_proc = None
+    subprocess.run(["pkill", "-f", "ollama serve"], capture_output=True)
+    return {"running": False}
+
+
+@app.post("/ai/pull")
+async def ai_pull(req: _PullReq):
+    model = req.model
+    if not _ollama_running():
+        return JSONResponse(status_code=503, content={"error": "Ollama not running"})
+    _pull_state[model] = {"running": True, "done": False, "progress": 0,
+                          "status": "Starting…", "error": None}
+    asyncio.create_task(_run_pull(model))
+    return {"status": "started", "model": model}
+
+
+@app.get("/ai/pull/status")
+def ai_pull_status(model: str = "qwen3.5:0.8b"):
+    return _pull_state.get(model, {"running": False, "done": False, "progress": 0,
+                                    "status": "Not started", "error": None})
+
+
+async def _run_pull(model: str):
+    def do_pull():
+        data = json.dumps({"name": model}).encode()
+        req = _urllib_req.Request(
+            f"{OLLAMA_BASE}/api/pull", data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        with _urllib_req.urlopen(req, timeout=3600) as resp:
+            for raw in resp:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                    status    = obj.get("status", "")
+                    total     = obj.get("total", 0)
+                    completed = obj.get("completed", 0)
+                    pct = int(completed * 100 / total) if total > 0 else 0
+                    _pull_state[model].update({"status": status, "progress": pct})
+                except Exception:
+                    pass
+    try:
+        await asyncio.get_event_loop().run_in_executor(None, do_pull)
+        _pull_state[model].update({"running": False, "done": True,
+                                    "progress": 100, "status": "Ready"})
+    except Exception as e:
+        _pull_state[model].update({"running": False, "done": False,
+                                    "error": str(e), "status": "Error"})
+
+
+@app.post("/ai/chat")
+async def ai_chat(req: _AiChatReq):
+    if not _ollama_running():
+        return JSONResponse(status_code=503, content={"error": "Ollama not running"})
+
+    def do_chat():
+        payload = {
+            "model": req.model,
+            "messages": [{"role": m.role, "content": m.content} for m in req.messages],
+            "stream": False,
+        }
+        data = json.dumps(payload).encode()
+        http_req = _urllib_req.Request(
+            f"{OLLAMA_BASE}/api/chat", data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        with _urllib_req.urlopen(http_req, timeout=180) as resp:
+            return json.loads(resp.read())
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, do_chat)
+        content = result.get("message", {}).get("content", "")
+        return {"response": content, "model": req.model}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     cert_file = os.path.join(os.path.dirname(__file__), "cert.pem")
     key_file = os.path.join(os.path.dirname(__file__), "key.pem")
