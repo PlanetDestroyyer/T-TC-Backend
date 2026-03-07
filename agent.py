@@ -1345,32 +1345,36 @@ async def _run_ollama_install():
     # Ollama v0.17+ only ships .tar.zst on GitHub. Extract using the system zstd binary.
     zst_url = f"https://github.com/ollama/ollama/releases/latest/download/ollama-linux-{bin_arch}.tar.zst"
     _install_state["log"].append(f"Arch: {arch} → {bin_arch}")
-    _install_state["log"].append("Downloading Ollama (~50 MB)…")
 
     def do_install():
         import subprocess as _sp, tempfile as _tmp
         os.makedirs(os.path.dirname(OLLAMA_BIN), exist_ok=True)
         tmp_zst = os.path.join(_tmp.gettempdir(), f"ollama-{bin_arch}.tar.zst")
 
-        # ── 1. Download ───────────────────────────────────────────────────────
-        with _urllib_req.urlopen(zst_url, timeout=300) as resp:
-            total = int(resp.headers.get("Content-Length", 0))
-            downloaded = 0
-            last_pct = -1
-            with open(tmp_zst, "wb") as f:
-                while True:
-                    buf = resp.read(1 << 18)  # 256 KB
-                    if not buf:
-                        break
-                    f.write(buf)
-                    downloaded += len(buf)
-                    if total:
-                        pct = int(downloaded * 100 / total)
-                        if pct != last_pct and pct % 5 == 0:
-                            _install_state["log"].append(
-                                f"  {pct}% — {downloaded >> 20} MB / {total >> 20} MB"
-                            )
-                            last_pct = pct
+        # ── 1. Download (skip if already cached from a previous attempt) ─────
+        cached = os.path.isfile(tmp_zst) and os.path.getsize(tmp_zst) > 100 * 1024 * 1024
+        if cached:
+            _install_state["log"].append("Using cached download, extracting…")
+        else:
+            _install_state["log"].append("Downloading Ollama (~1.2 GB)…")
+            with _urllib_req.urlopen(zst_url, timeout=300) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
+                last_pct = -1
+                with open(tmp_zst, "wb") as f:
+                    while True:
+                        buf = resp.read(1 << 18)  # 256 KB
+                        if not buf:
+                            break
+                        f.write(buf)
+                        downloaded += len(buf)
+                        if total:
+                            pct = int(downloaded * 100 / total)
+                            if pct != last_pct and pct % 5 == 0:
+                                _install_state["log"].append(
+                                    f"  {pct}% — {downloaded >> 20} MB / {total >> 20} MB"
+                                )
+                                last_pct = pct
 
         # ── 2. Ensure zstd is available (apk add if needed) ──────────────────
         import shutil as _shutil
