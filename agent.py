@@ -1337,29 +1337,28 @@ def ai_install_status():
 
 
 async def _run_ollama_install():
-    import tarfile as _tarfile
     global _install_state
     arch = platform.machine()
     arch_map = {"aarch64": "arm64", "x86_64": "amd64", "armv7l": "arm"}
     bin_arch = arch_map.get(arch, "arm64")
 
-    # ollama.com CDN provides .tgz which Python tarfile handles natively (no zstd needed).
-    # Falls back to GitHub .tar.zst only if .tgz returns 404.
-    tgz_url  = f"https://ollama.com/download/ollama-linux-{bin_arch}.tgz"
+    # Ollama v0.17+ only ships .tar.zst on GitHub. Extract using the system zstd binary.
+    zst_url = f"https://github.com/ollama/ollama/releases/latest/download/ollama-linux-{bin_arch}.tar.zst"
     _install_state["log"].append(f"Arch: {arch} → {bin_arch}")
     _install_state["log"].append("Downloading Ollama (~50 MB)…")
 
     def do_install():
-        import tempfile
+        import subprocess as _sp, tempfile as _tmp
         os.makedirs(os.path.dirname(OLLAMA_BIN), exist_ok=True)
-        tmp_tgz = os.path.join(tempfile.gettempdir(), f"ollama-{bin_arch}.tgz")
+        tmp_zst = os.path.join(_tmp.gettempdir(), f"ollama-{bin_arch}.tar.zst")
+        extract_dir = os.path.join(_tmp.gettempdir(), f"ollama_extract_{bin_arch}")
 
         # ── 1. Download ───────────────────────────────────────────────────────
-        with _urllib_req.urlopen(tgz_url, timeout=300) as resp:
+        with _urllib_req.urlopen(zst_url, timeout=300) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
             last_pct = -1
-            with open(tmp_tgz, "wb") as f:
+            with open(tmp_zst, "wb") as f:
                 while True:
                     buf = resp.read(1 << 18)  # 256 KB
                     if not buf:
@@ -1374,32 +1373,49 @@ async def _run_ollama_install():
                             )
                             last_pct = pct
 
-        # ── 2. Extract bin/ollama from .tgz ──────────────────────────────────
-        _install_state["log"].append("Extracting…")
-        with _tarfile.open(tmp_tgz, "r:gz") as tar:
-            # The archive contains bin/ollama (inside /usr/local layout)
-            target = None
-            for member in tar.getmembers():
-                name = member.name.lstrip("./")
-                if name in ("bin/ollama", "ollama") or name.endswith("/ollama"):
-                    target = member
-                    break
-            if target is None:
-                raise RuntimeError(
-                    f"ollama binary not found in archive. Members: "
-                    + ", ".join(m.name for m in tar.getmembers()[:10])
-                )
-            f = tar.extractfile(target)
-            if f is None:
-                raise RuntimeError("Could not read ollama binary from archive")
-            with open(OLLAMA_BIN, "wb") as out:
-                out.write(f.read())
+        # ── 2. Ensure zstd is available (apk add if needed) ──────────────────
+        import shutil as _shutil
+        if not _shutil.which("zstd"):
+            _install_state["log"].append("Installing zstd…")
+            _sp.run(["apk", "add", "--no-cache", "zstd"], capture_output=True)
 
+        # ── 3. Decompress .tar.zst → extract bin/ollama ──────────────────────
+        _install_state["log"].append("Extracting…")
+        os.makedirs(extract_dir, exist_ok=True)
+        result = _sp.run(
+            f"zstd -d -c {tmp_zst} | tar -x -C {extract_dir}",
+            shell=True, capture_output=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Extraction failed: {result.stderr.decode(errors='replace')[:200]}")
+
+        # Find the ollama binary in the extracted dir
+        found = None
+        for root, dirs, files in os.walk(extract_dir):
+            if "ollama" in files:
+                candidate = os.path.join(root, "ollama")
+                if os.path.isfile(candidate):
+                    found = candidate
+                    break
+        if not found:
+            listing = []
+            for root, dirs, files in os.walk(extract_dir):
+                listing += [os.path.join(root, f) for f in files]
+            raise RuntimeError(f"ollama binary not found. Files: {listing[:10]}")
+
+        import shutil as _shutil2
+        _shutil2.copy2(found, OLLAMA_BIN)
         os.chmod(OLLAMA_BIN, 0o755)
-        try:
-            os.remove(tmp_tgz)
-        except OSError:
-            pass
+
+        # Cleanup
+        for p in (tmp_zst, extract_dir):
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+                elif os.path.isdir(p):
+                    _shutil2.rmtree(p)
+            except OSError:
+                pass
 
     try:
         await asyncio.get_event_loop().run_in_executor(None, do_install)
