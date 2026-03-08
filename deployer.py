@@ -346,9 +346,8 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         if app_type == "vite":
             # Vite build runs OUTSIDE the agent's proot session (fresh proot via Android app)
             # to avoid mkdir ENOSYS from AT_FDCWD corruption.  Signal the mobile app to build.
-            # Always use yarn — it's installed in Alpine and works reliably in a
-            # fresh proot session.  npm is often absent or fails with ENOSYS in proot.
-            pkg_manager = "yarn"
+            # Always use pnpm — faster than yarn/npm, better retry logic, shared store.
+            pkg_manager = "pnpm"
 
             # Register the app immediately so the UI can show it
             reg = _load()
@@ -860,7 +859,11 @@ async def _run_async(cmd: list[str], timeout: int = 120) -> str:
     # be in the process environment before Node.js initializes, not set via JS.
     # proot intercepts syscalls via ptrace but NOT io_uring ring submissions, so
     # async fs ops (mkdir, open, …) through io_uring bypass proot and return ENOENT.
-    env = {**os.environ, "UV_USE_IO_URING": "0"}
+    env = {
+        **os.environ, 
+        "UV_USE_IO_URING": "0",
+        "NODE_OPTIONS": "--dns-result-order=ipv4first"
+    }
     if cmd and cmd[0] == "git":
         git_cfg = os.path.expanduser("~/.config/git")
         os.makedirs(git_cfg, exist_ok=True)
@@ -1099,8 +1102,8 @@ async def _install_deps(app_dir: str, app_type: str):
         # Auto-detect package manager: prefer the lockfile that's already in the repo.
         # Using the wrong one causes "package-lock.json found" warnings and can break installs.
         has_package_lock = os.path.exists(os.path.join(app_dir, "package-lock.json"))
-        has_yarn_lock    = os.path.exists(os.path.join(app_dir, "yarn.lock"))
-        use_npm = has_package_lock and not has_yarn_lock
+        has_pnpm_lock    = os.path.exists(os.path.join(app_dir, "pnpm-lock.yaml"))
+        use_npm = has_package_lock and not has_pnpm_lock
 
         os.makedirs(os.path.join(app_dir, "node_modules"), exist_ok=True)
 
@@ -1124,50 +1127,28 @@ async def _install_deps(app_dir: str, app_type: str):
             await _run_async([node_bin, build_wrapper], timeout=900)
 
         else:
-            # Yarn path — yarn uses different internal fs code paths that work in proot.
-            yarn_bin = "/usr/bin/yarn"
-            if not os.path.exists(yarn_bin):
-                raise RuntimeError("yarn not found — reinstall TinyCell app to re-run bootstrap")
+            # pnpm path
+            # Need to ensure pnpm is installed via npm since it's not in Alpine apk
+            import shutil
+            if not shutil.which("pnpm") and not os.path.exists("/usr/lib/node_modules/pnpm/bin/pnpm.cjs") and                not os.path.exists("/usr/local/lib/node_modules/pnpm/bin/pnpm.cjs"):
+                print("Installing pnpm globally via npm...")
+                install_pnpm = _write_npm_wrapper("/tmp", [
+                    "install", "-g", "pnpm"
+                ])
+                await _run_async([node_bin, install_pnpm], timeout=600)
+            
+            pnpm_cache = os.path.join(app_dir, ".pnpm-store")
+            os.makedirs(pnpm_cache, exist_ok=True)
 
-            yarn_cache = os.path.join(app_dir, ".yarn-cache")
-            os.makedirs(yarn_cache, exist_ok=True)
-
-            # Pre-create dirs/files yarn reads at startup (proot returns ENOSYS not ENOENT).
-            for d in [
-                "/etc/yarn",
-                "/usr/local/etc",
-                "/usr/local/share/.config/yarn",
-                "/usr/local/share/.config/yarn/link",
-                os.path.expanduser("~/.config/yarn"),
-                os.path.expanduser("~/.config/yarn/link"),
-                os.path.expanduser("~/.yarn"),
-                os.path.expanduser("~/.yarn/link"),
-            ]:
-                os.makedirs(d, exist_ok=True)
-            for f in [
-                "/etc/yarn/config",
-                "/usr/local/etc/yarnrc",
-                os.path.expanduser("~/.yarnrc"),
-                os.path.expanduser("~/.config/yarn/config"),
-                os.path.join(app_dir, ".yarnrc"),
-            ]:
-                if not os.path.exists(f):
-                    open(f, "w").close()
-
-            yarn_global = os.path.join(app_dir, ".yarn-global")
-            os.makedirs(os.path.join(yarn_global, "link"), exist_ok=True)
-            install_wrapper = _write_yarn_wrapper(app_dir, [
-                "--cwd", app_dir,
-                "--cache-folder", yarn_cache,
-                "--global-folder", yarn_global,
-                "--non-interactive",
+            install_wrapper = _write_pnpm_wrapper(app_dir, [
+                "--dir", app_dir,
+                "--store-dir", pnpm_cache,
                 "install",
             ])
             await _run_async([node_bin, install_wrapper], timeout=900)
 
-            build_wrapper = _write_yarn_wrapper(app_dir, [
-                "--cwd", app_dir,
-                "--global-folder", yarn_global,
-                "build",
+            build_wrapper = _write_pnpm_wrapper(app_dir, [
+                "--dir", app_dir,
+                "run", "build",
             ])
             await _run_async([node_bin, build_wrapper], timeout=900)
