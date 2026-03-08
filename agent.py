@@ -469,6 +469,15 @@ async def build_ready(deploy_id: str, body: dict = Body(default={})):
     return {"ok": True}
 
 
+@app.post("/deploy/{deploy_id}/tunnel-ready")
+async def tunnel_ready(deploy_id: str, body: dict = Body(default={})):
+    """Called by the mobile app after it starts the cloudflared tunnel (NDK binary, can't run in Alpine)."""
+    url   = body.get("url")
+    error = body.get("error")
+    deployer.signal_tunnel_ready(deploy_id, url, error)
+    return {"ok": True}
+
+
 @app.get("/apps")
 def list_apps():
     return deployer.get_all_apps()

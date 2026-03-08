@@ -26,8 +26,10 @@ _pids: dict = {}         # {app_id: {app_pid, tunnel_pid}}
 running_apps: dict = {}  # {app_id: pid} — shared with thermal manager
 _deployments: dict = {}  # {deploy_id: progress dict}
 _tunnel_fail: dict = {}  # {app_id: consecutive_fail_count}
-_build_events: dict = {} # {deploy_id: asyncio.Event} — host build IPC
+_build_events: dict = {}  # {deploy_id: asyncio.Event} — host build IPC
 _build_results: dict = {} # {deploy_id: {"error": str|None}}
+_tunnel_events: dict = {} # {deploy_id: asyncio.Event} — host tunnel IPC
+_tunnel_results: dict = {} # {deploy_id: {"url": str|None, "error": str|None}}
 
 
 # ─── Host build IPC ──────────────────────────────────────────────────────────
@@ -36,6 +38,14 @@ def signal_build_ready(deploy_id: str, error: str | None = None):
     """Called by the /deploy/<id>/build-ready endpoint when the mobile app finishes building."""
     _build_results[deploy_id] = {"error": error}
     ev = _build_events.pop(deploy_id, None)
+    if ev:
+        ev.set()
+
+
+def signal_tunnel_ready(deploy_id: str, url: str | None, error: str | None = None):
+    """Called by the /deploy/<id>/tunnel-ready endpoint when the mobile app starts the tunnel."""
+    _tunnel_results[deploy_id] = {"url": url, "error": error}
+    ev = _tunnel_events.pop(deploy_id, None)
     if ev:
         ev.set()
 
@@ -172,6 +182,7 @@ async def start_app(app_id: str) -> bool:
     app = reg["apps"].get(app_id)
     if not app:
         return False
+    _free_port(app["port"])  # kill any stale process holding this port
     proc = _launch_app(app)
     if not proc:
         return False
@@ -265,6 +276,7 @@ async def _run_update(deploy_id: str, app_id: str):
         step("Dependencies ready", done=True)
 
         step("Starting app...")
+        _free_port(port)  # kill any stale process on this port before relaunch
         proc = _launch_app(app)
         if not proc:
             raise RuntimeError("Failed to launch app")
@@ -274,7 +286,19 @@ async def _run_update(deploy_id: str, app_id: str):
         step("App started", done=True)
 
         step("Creating public URL...")
-        tunnel_url = await _setup_tunnel(app_id, port) or ""
+        _deployments[deploy_id]["status"] = "waiting_host_tunnel"
+        _deployments[deploy_id]["tunnel_info"] = {"port": port}
+        ev = asyncio.Event()
+        _tunnel_events[deploy_id] = ev
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=120)
+        except asyncio.TimeoutError:
+            raise RuntimeError("Tunnel setup timed out — mobile app did not start cloudflared")
+        result = _tunnel_results.pop(deploy_id, {})
+        if result.get("error"):
+            raise RuntimeError(f"Tunnel failed: {result['error']}")
+        tunnel_url = result.get("url") or ""
+        _deployments[deploy_id]["status"] = "deploying"
         step(f"URL: {tunnel_url or 'unavailable'}", done=True)
 
         reg = _load()
@@ -363,6 +387,7 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
             step("Dependencies installed", done=True)
 
         step("Starting server...")
+        _free_port(port)  # kill any stale process on this port (e.g. after deployer restart)
         proc = _launch_app({"type": app_type, "app_dir": app_dir, "port": port})
         if not proc:
             raise RuntimeError(f"Unknown app type: {app_type}")
@@ -370,7 +395,19 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         step("Server started", done=True)
 
         step("Creating public URL...")
-        tunnel_url = await _setup_tunnel(app_name, port) or ""
+        _deployments[deploy_id]["status"] = "waiting_host_tunnel"
+        _deployments[deploy_id]["tunnel_info"] = {"port": port}
+        ev = asyncio.Event()
+        _tunnel_events[deploy_id] = ev
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=120)
+        except asyncio.TimeoutError:
+            raise RuntimeError("Tunnel setup timed out — mobile app did not start cloudflared")
+        result = _tunnel_results.pop(deploy_id, {})
+        if result.get("error"):
+            raise RuntimeError(f"Tunnel failed: {result['error']}")
+        tunnel_url = result.get("url") or ""
+        _deployments[deploy_id]["status"] = "deploying"
         step(f"URL: {tunnel_url or 'unavailable'}", done=True)
 
         _pids[app_name] = {"app_pid": proc.pid}
@@ -540,6 +577,38 @@ def _kill(pid: int | None):
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
+        pass
+
+
+def _free_port(port: int):
+    """Kill any process listening on the given TCP port (handles deployer restarts
+    where _pids lost track of the old process)."""
+    try:
+        # /proc/net/tcp stores hex local_address as IPADDR:PORT (little-endian on ARM)
+        hex_port = f"{port:04X}"
+        with open("/proc/net/tcp") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 10:
+                    continue
+                local = parts[1]        # e.g. "00000000:0BD9"
+                if local.split(":")[1] != hex_port:
+                    continue
+                inode = parts[9]
+                # Find PID owning this inode via /proc/<pid>/fd symlinks
+                for pid_dir in os.listdir("/proc"):
+                    if not pid_dir.isdigit():
+                        continue
+                    try:
+                        fd_dir = f"/proc/{pid_dir}/fd"
+                        for fd in os.listdir(fd_dir):
+                            target = os.readlink(f"{fd_dir}/{fd}")
+                            if f"socket:[{inode}]" in target:
+                                _kill(int(pid_dir))
+                                return
+                    except OSError:
+                        continue
+    except Exception:
         pass
 
 
