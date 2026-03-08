@@ -142,7 +142,7 @@ def get_app_metrics(app_id: str) -> dict:
             "cpu_percent": proc.cpu_percent(interval=0.5),
             "uptime_seconds": int(time.time() - proc.create_time()),
         }
-    except psutil.NoSuchProcess:
+    except Exception:
         return {"status": "stopped", "ram_mb": 0, "cpu_percent": 0, "uptime_seconds": 0}
 
 
