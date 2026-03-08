@@ -322,9 +322,9 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         if app_type == "react":
             # React build runs OUTSIDE the agent's proot session (fresh proot via Android app)
             # to avoid mkdir ENOSYS from AT_FDCWD corruption.  Signal the mobile app to build.
-            has_pkg_lock = os.path.exists(os.path.join(app_dir, "package-lock.json"))
-            has_yarn_lock = os.path.exists(os.path.join(app_dir, "yarn.lock"))
-            pkg_manager = "npm" if (has_pkg_lock and not has_yarn_lock) else "yarn"
+            # Always use yarn — it's installed in Alpine and works reliably in a
+            # fresh proot session.  npm is often absent or fails with ENOSYS in proot.
+            pkg_manager = "yarn"
 
             # Register the app immediately so the UI can show it
             reg = _load()
