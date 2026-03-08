@@ -16,16 +16,16 @@
     }
 
     :root {
-      --bg: #060D18;
-      --card: #0F1D2F;
-      --card2: #162033;
-      --border: #1E3048;
-      --text: #EEF4FF;
-      --muted: #7B9AB8;
-      --dim: #3A5270;
-      --blue: #3B8FF5;
-      --green: #22C55E;
-      --red: #F43F5E;
+      --bg:     #000000;
+      --card:   #111111;
+      --card2:  #181818;
+      --border: #1E1E1E;
+      --text:   #F0F0F0;
+      --muted:  #888888;
+      --dim:    #444444;
+      --blue:   #4D9FFF;
+      --green:  #22C55E;
+      --red:    #F43F5E;
     }
 
     body {
@@ -38,7 +38,7 @@
 
     /* ── Header ── */
     header {
-      background: rgba(6, 13, 24, .9);
+      background: rgba(0, 0, 0, .92);
       backdrop-filter: blur(12px);
       border-bottom: 1px solid var(--border);
       padding: 0 24px;
@@ -55,7 +55,8 @@
       width: 28px;
       height: 28px;
       border-radius: 8px;
-      background: linear-gradient(135deg, #3B8FF5, #8B5CF6);
+      background: var(--card2);
+      border: 1px solid var(--border);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -68,13 +69,13 @@
     }
 
     header h1 span {
-      color: #5BACFF;
+      color: var(--blue);
     }
 
     .hdr-right {
       margin-left: auto;
       font-size: 12px;
-      color: var(--dim);
+      color: var(--muted);
     }
 
     /* ── Layout ── */
@@ -98,7 +99,7 @@
     .drop-zone:hover,
     .drop-zone.over {
       border-color: var(--blue);
-      background: rgba(59, 143, 245, .05);
+      background: rgba(77, 159, 255, .05);
     }
 
     .drop-zone .dz-icon {
@@ -305,11 +306,11 @@
     }
 
     .ibtn.dl {
-      color: #5BACFF;
+      color: var(--blue);
     }
 
     .ibtn.dl:hover {
-      background: rgba(59, 143, 245, .12);
+      background: rgba(77, 159, 255, .12);
     }
 
     .ibtn.del {
@@ -451,13 +452,13 @@
     }
 
     .modal {
-      background: #0B1525;
+      background: var(--card);
       border: 1px solid var(--border);
       border-radius: 20px;
       padding: 28px;
       width: 320px;
       max-width: 90vw;
-      box-shadow: 0 24px 60px rgba(0, 0, 0, .6);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .8);
     }
 
     .modal h3 {
@@ -509,7 +510,7 @@
   <header>
     <div class="logo-box">💾</div>
     <h1>Tiny<span>Cell</span> NAS</h1>
-    <div class="hdr-right"><span id="hdr-info" style="font-size:12px;color:#6b85b0;"></span></div>
+    <div class="hdr-right"><span id="hdr-info" style="font-size:12px;color:var(--muted);"></span></div>
   </header>
 
   <div class="wrap">
