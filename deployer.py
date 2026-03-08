@@ -343,8 +343,8 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         port = port_manager.allocate(app_name, app_type)
         step(f"Port allocated: {port}", done=True)
 
-        if app_type == "react":
-            # React build runs OUTSIDE the agent's proot session (fresh proot via Android app)
+        if app_type == "vite":
+            # Vite build runs OUTSIDE the agent's proot session (fresh proot via Android app)
             # to avoid mkdir ENOSYS from AT_FDCWD corruption.  Signal the mobile app to build.
             # Always use yarn — it's installed in Alpine and works reliably in a
             # fresh proot session.  npm is often absent or fails with ENOSYS in proot.
@@ -373,7 +373,7 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
             try:
                 await asyncio.wait_for(event.wait(), timeout=1200)
             except asyncio.TimeoutError:
-                raise RuntimeError("React build timed out — app took too long to build on device")
+                raise RuntimeError("Vite build timed out — app took too long to build on device")
 
             result = _build_results.pop(deploy_id, {})
             if result.get("error"):
@@ -616,9 +616,15 @@ def _detect_type(app_dir: str) -> str:
     pkg = os.path.join(app_dir, "package.json")
     if os.path.exists(pkg):
         with open(pkg) as f:
-            deps = json.load(f).get("dependencies", {})
-        if "react" in deps or "react-dom" in deps:
-            return "react"
+            data = json.load(f)
+        all_deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+        # Detect vite: vite.config.* present OR vite in deps/devDeps
+        vite_config = any(
+            os.path.exists(os.path.join(app_dir, f"vite.config.{ext}"))
+            for ext in ("js", "ts", "mjs", "mts")
+        )
+        if vite_config or "vite" in all_deps:
+            return "vite"
     req = os.path.join(app_dir, "requirements.txt")
     if os.path.exists(req):
         with open(req) as f:
@@ -685,7 +691,7 @@ mod.app.run(host="0.0.0.0", port={port})
 
 
 def _write_static_server(app_id: str, build_dir: str, port: int) -> str:
-    """Write a Python http.server launcher for React build output.
+    """Write a Python http.server launcher for Vite build output.
 
     Uses Python's stdlib http.server instead of Node.js serve to avoid the
     Node.js process.cwd() / getcwd() ENOSYS issue inside proot.
@@ -725,8 +731,8 @@ def _launch_app(app: dict) -> subprocess.Popen | None:
         with open(log, "a") as lf:
             return subprocess.Popen([py, launcher], stdout=lf, stderr=lf, env=env)
 
-    elif t == "react":
-        # Use Python http.server to serve the React build — no Node.js needed at runtime.
+    elif t == "vite":
+        # Use Python http.server to serve the Vite build — no Node.js needed at runtime.
         build = os.path.join(d, "build" if os.path.exists(os.path.join(d, "build")) else "dist")
         launcher = _write_static_server(app_id, build, p)
         with open(log, "a") as lf:
@@ -1085,7 +1091,7 @@ async def _install_deps(app_dir: str, app_type: str):
                     try: os.unlink(p)
                     except OSError: pass
 
-    elif app_type == "react":
+    elif app_type == "vite":
         node_bin = "/usr/bin/node"
         if not os.path.exists(node_bin):
             raise RuntimeError("nodejs not found — reinstall TinyCell app to re-run bootstrap")
