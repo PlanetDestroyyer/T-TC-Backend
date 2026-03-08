@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Query
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Query, Body
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -459,6 +459,14 @@ def get_deploy_progress(deploy_id: str):
     if not progress:
         return JSONResponse(status_code=404, content={"error": "Deploy ID not found"})
     return progress
+
+
+@app.post("/deploy/{deploy_id}/build-ready")
+async def build_ready(deploy_id: str, body: dict = Body(default={})):
+    """Called by the mobile app after it finishes building a React app in a fresh proot session."""
+    error = body.get("error")
+    deployer.signal_build_ready(deploy_id, error)
+    return {"ok": True}
 
 
 @app.get("/apps")

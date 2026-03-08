@@ -26,6 +26,18 @@ _pids: dict = {}         # {app_id: {app_pid, tunnel_pid}}
 running_apps: dict = {}  # {app_id: pid} — shared with thermal manager
 _deployments: dict = {}  # {deploy_id: progress dict}
 _tunnel_fail: dict = {}  # {app_id: consecutive_fail_count}
+_build_events: dict = {} # {deploy_id: asyncio.Event} — host build IPC
+_build_results: dict = {} # {deploy_id: {"error": str|None}}
+
+
+# ─── Host build IPC ──────────────────────────────────────────────────────────
+
+def signal_build_ready(deploy_id: str, error: str | None = None):
+    """Called by the /deploy/<id>/build-ready endpoint when the mobile app finishes building."""
+    _build_results[deploy_id] = {"error": error}
+    ev = _build_events.pop(deploy_id, None)
+    if ev:
+        ev.set()
 
 
 # ─── Registry ────────────────────────────────────────────────────────────────
@@ -307,9 +319,48 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         port = port_manager.allocate(app_name, app_type)
         step(f"Port allocated: {port}", done=True)
 
-        step("Installing dependencies...")
-        await _install_deps(app_dir, app_type)
-        step("Dependencies installed", done=True)
+        if app_type == "react":
+            # React build runs OUTSIDE the agent's proot session (fresh proot via Android app)
+            # to avoid mkdir ENOSYS from AT_FDCWD corruption.  Signal the mobile app to build.
+            has_pkg_lock = os.path.exists(os.path.join(app_dir, "package-lock.json"))
+            has_yarn_lock = os.path.exists(os.path.join(app_dir, "yarn.lock"))
+            pkg_manager = "npm" if (has_pkg_lock and not has_yarn_lock) else "yarn"
+
+            # Register the app immediately so the UI can show it
+            reg = _load()
+            reg["apps"][app_name] = {
+                "id": app_name, "name": app_name, "type": app_type,
+                "repo_url": repo_url, "port": port, "status": "building",
+                "pid": None, "tunnel_url": None, "tunnel_status": None,
+                "app_dir": app_dir, "auto_restart": auto_restart,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "restart_count": 0,
+            }
+            _save(reg)
+
+            # Store build info so mobile app knows what to build
+            _deployments[deploy_id]["build_info"] = {"app_dir": app_dir, "pkg_manager": pkg_manager}
+            _deployments[deploy_id]["app_id"] = app_name
+            _deployments[deploy_id]["status"] = "waiting_host_build"
+            step(f"Waiting for device build ({pkg_manager})…", done=True)
+
+            # Wait up to 20 min for the mobile app to call /deploy/<id>/build-ready
+            event = asyncio.Event()
+            _build_events[deploy_id] = event
+            try:
+                await asyncio.wait_for(event.wait(), timeout=1200)
+            except asyncio.TimeoutError:
+                raise RuntimeError("React build timed out — app took too long to build on device")
+
+            result = _build_results.pop(deploy_id, {})
+            if result.get("error"):
+                raise RuntimeError(f"Device build failed: {result['error']}")
+
+            step("Build complete", done=True)
+            _deployments[deploy_id]["status"] = "deploying"
+        else:
+            step("Installing dependencies...")
+            await _install_deps(app_dir, app_type)
+            step("Dependencies installed", done=True)
 
         step("Starting server...")
         proc = _launch_app({"type": app_type, "app_dir": app_dir, "port": port})
@@ -326,21 +377,18 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         running_apps[app_name] = proc.pid
 
         reg = _load()
-        reg["apps"][app_name] = {
-            "id": app_name,
-            "name": app_name,
-            "type": app_type,
-            "repo_url": repo_url,
-            "port": port,
-            "status": "running",
-            "pid": proc.pid,
+        if app_name not in reg["apps"]:
+            reg["apps"][app_name] = {
+                "id": app_name, "name": app_name, "type": app_type,
+                "repo_url": repo_url, "port": port,
+                "app_dir": app_dir, "auto_restart": auto_restart,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "restart_count": 0,
+            }
+        reg["apps"][app_name].update({
+            "status": "running", "pid": proc.pid,
             "tunnel_url": tunnel_url,
             "tunnel_status": "active" if tunnel_url else "dead",
-            "app_dir": app_dir,
-            "auto_restart": auto_restart,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "restart_count": 0,
-        }
+        })
         _save(reg)
 
         _deployments[deploy_id]["status"] = "done"
@@ -969,68 +1017,82 @@ async def _install_deps(app_dir: str, app_type: str):
                     except OSError: pass
 
     elif app_type == "react":
-        # Ensure nodejs + yarn are installed.
-        # We use Yarn instead of npm: npm's internal mkdir calls fail inside proot
-        # due to proot's incomplete ptrace-based syscall emulation on ARM64 Android.
-        # Yarn uses different internal fs code paths that work correctly in proot.
-        # (Confirmed fix: termux/proot-distro#548)
         node_bin = "/usr/bin/node"
-        yarn_bin = "/usr/bin/yarn"
-        # nodejs + yarn are pre-installed by bootstrap.sh at setup time.
-        # We never run apk here — apk corrupts proot's AT_FDCWD tracking mid-session.
         if not os.path.exists(node_bin):
             raise RuntimeError("nodejs not found — reinstall TinyCell app to re-run bootstrap")
-        if not os.path.exists(yarn_bin):
-            raise RuntimeError("yarn not found — reinstall TinyCell app to re-run bootstrap")
 
-        # Pre-create node_modules and yarn cache dir.
+        # Auto-detect package manager: prefer the lockfile that's already in the repo.
+        # Using the wrong one causes "package-lock.json found" warnings and can break installs.
+        has_package_lock = os.path.exists(os.path.join(app_dir, "package-lock.json"))
+        has_yarn_lock    = os.path.exists(os.path.join(app_dir, "yarn.lock"))
+        use_npm = has_package_lock and not has_yarn_lock
+
         os.makedirs(os.path.join(app_dir, "node_modules"), exist_ok=True)
-        yarn_cache = os.path.join(app_dir, ".yarn-cache")
-        os.makedirs(yarn_cache, exist_ok=True)
 
-        # Pre-create ALL directories and files that yarn reads during startup.
-        # proot returns ENOSYS (not ENOENT) for fs calls on non-existent paths,
-        # crashing yarn. Creating them as empty files/dirs lets yarn proceed normally.
-        # Paths from yarn's parseRcPaths/findRc/getLinkRegistryPath:
-        for d in [
-            "/etc/yarn",
-            "/usr/local/etc",
-            "/usr/local/share/.config/yarn",
-            "/usr/local/share/.config/yarn/link",
-            os.path.expanduser("~/.config/yarn"),
-            os.path.expanduser("~/.config/yarn/link"),
-            os.path.expanduser("~/.yarn"),
-            os.path.expanduser("~/.yarn/link"),
-        ]:
-            os.makedirs(d, exist_ok=True)
-        for f in [
-            "/etc/yarn/config",
-            "/usr/local/etc/yarnrc",
-            os.path.expanduser("~/.yarnrc"),
-            os.path.expanduser("~/.config/yarn/config"),
-            os.path.join(app_dir, ".yarnrc"),
-        ]:
-            if not os.path.exists(f):
-                open(f, "w").close()
+        if use_npm:
+            # npm path — wrap to patch process.cwd / recursive mkdir (proot ENOSYS fixes).
+            npm_bin = "/usr/bin/npm"
+            if not os.path.exists(npm_bin):
+                raise RuntimeError("npm not found — reinstall TinyCell app to re-run bootstrap")
+            install_wrapper = _write_npm_wrapper(app_dir, [
+                "--prefix", app_dir,
+                "--cache", os.path.join(app_dir, ".npm-cache"),
+                "--no-audit", "--no-fund",
+                "install",
+            ])
+            await _run_async([node_bin, install_wrapper], timeout=900)
 
-        # Use wrapper script to patch process.cwd (getcwd ENOSYS in proot).
-        # --global-folder: redirect yarn's global link registry away from
-        # /usr/local/share/.config/yarn (which scandir returns ENOSYS on in proot)
-        # to our app's cache dir which we own and is fully writable.
-        yarn_global = os.path.join(app_dir, ".yarn-global")
-        os.makedirs(os.path.join(yarn_global, "link"), exist_ok=True)
-        install_wrapper = _write_yarn_wrapper(app_dir, [
-            "--cwd", app_dir,
-            "--cache-folder", yarn_cache,
-            "--global-folder", yarn_global,
-            "--non-interactive",
-            "install",
-        ])
-        await _run_async([node_bin, install_wrapper], timeout=900)
+            build_wrapper = _write_npm_wrapper(app_dir, [
+                "--prefix", app_dir,
+                "run", "build",
+            ])
+            await _run_async([node_bin, build_wrapper], timeout=900)
 
-        build_wrapper = _write_yarn_wrapper(app_dir, [
-            "--cwd", app_dir,
-            "--global-folder", yarn_global,
-            "build",
-        ])
-        await _run_async([node_bin, build_wrapper], timeout=900)
+        else:
+            # Yarn path — yarn uses different internal fs code paths that work in proot.
+            yarn_bin = "/usr/bin/yarn"
+            if not os.path.exists(yarn_bin):
+                raise RuntimeError("yarn not found — reinstall TinyCell app to re-run bootstrap")
+
+            yarn_cache = os.path.join(app_dir, ".yarn-cache")
+            os.makedirs(yarn_cache, exist_ok=True)
+
+            # Pre-create dirs/files yarn reads at startup (proot returns ENOSYS not ENOENT).
+            for d in [
+                "/etc/yarn",
+                "/usr/local/etc",
+                "/usr/local/share/.config/yarn",
+                "/usr/local/share/.config/yarn/link",
+                os.path.expanduser("~/.config/yarn"),
+                os.path.expanduser("~/.config/yarn/link"),
+                os.path.expanduser("~/.yarn"),
+                os.path.expanduser("~/.yarn/link"),
+            ]:
+                os.makedirs(d, exist_ok=True)
+            for f in [
+                "/etc/yarn/config",
+                "/usr/local/etc/yarnrc",
+                os.path.expanduser("~/.yarnrc"),
+                os.path.expanduser("~/.config/yarn/config"),
+                os.path.join(app_dir, ".yarnrc"),
+            ]:
+                if not os.path.exists(f):
+                    open(f, "w").close()
+
+            yarn_global = os.path.join(app_dir, ".yarn-global")
+            os.makedirs(os.path.join(yarn_global, "link"), exist_ok=True)
+            install_wrapper = _write_yarn_wrapper(app_dir, [
+                "--cwd", app_dir,
+                "--cache-folder", yarn_cache,
+                "--global-folder", yarn_global,
+                "--non-interactive",
+                "install",
+            ])
+            await _run_async([node_bin, install_wrapper], timeout=900)
+
+            build_wrapper = _write_yarn_wrapper(app_dir, [
+                "--cwd", app_dir,
+                "--global-folder", yarn_global,
+                "build",
+            ])
+            await _run_async([node_bin, build_wrapper], timeout=900)
