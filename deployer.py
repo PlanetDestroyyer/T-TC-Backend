@@ -393,6 +393,11 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         await asyncio.sleep(8)
         step("Server started", done=True)
 
+        # Set app_id NOW so the mobile app's runHostTunnel guard (!data.app_id) passes.
+        # Previously this was set only after the tunnel succeeded — mobile app skipped
+        # the tunnel for flask/fastapi because app_id was null during waiting_host_tunnel.
+        _deployments[deploy_id]["app_id"] = app_name
+
         step("Creating public URL...")
         _deployments[deploy_id]["status"] = "waiting_host_tunnel"
         _deployments[deploy_id]["tunnel_info"] = {"port": port}
@@ -428,7 +433,6 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         _save(reg)
 
         _deployments[deploy_id]["status"] = "done"
-        _deployments[deploy_id]["app_id"] = app_name
         _log_activity("deploy", app_name, f"type={app_type} url={tunnel_url}")
 
     except Exception as e:
