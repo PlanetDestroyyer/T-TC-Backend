@@ -20,6 +20,7 @@ import re
 import secrets
 import html as _html
 from threading import Thread
+import httpx
 import deployer
 
 # ─── Persistent Logging ──────────────────────────────────────────────────────
@@ -531,6 +532,51 @@ def get_app_logs(app_id: str, lines: int = 100):
 def get_activity(lines: int = 100):
     """Return the last N backend activity events (deploy, stop, start, delete, update, errors)."""
     return {"events": deployer.get_activity_log(lines)}
+
+
+# ── App Reverse Proxy ─────────────────────────────────────────────────────────
+# Routes /app/{app_id}/{path} → http://localhost:{app_port}/{path}
+# This allows deployed apps to be accessible via the Named Tunnel URL
+# (e.g. https://pranavnew.cfargotunnel.com/app/myapp/) without each app
+# needing its own separate cloudflared Quick Tunnel.
+
+@app.api_route(
+    "/app/{app_id}/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+)
+async def proxy_app(app_id: str, path: str, request: Request):
+    app_info = deployer.get_app(app_id)
+    if not app_info:
+        return JSONResponse(status_code=404, content={"error": "App not found"})
+    port = app_info.get("port")
+    if not port:
+        return JSONResponse(status_code=503, content={"error": "App has no port (background script?)"})
+
+    qs = request.url.query
+    target = f"http://localhost:{port}/{path}" + (f"?{qs}" if qs else "")
+    headers = {k: v for k, v in request.headers.items()
+               if k.lower() not in ("host", "content-length")}
+    body = await request.body()
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.request(
+                method=request.method,
+                url=target,
+                headers=headers,
+                content=body,
+                follow_redirects=True,
+            )
+        # Strip hop-by-hop headers that break streaming
+        skip = {"transfer-encoding", "connection", "keep-alive"}
+        resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in skip}
+        return StreamingResponse(
+            content=iter([resp.content]),
+            status_code=resp.status_code,
+            headers=resp_headers,
+        )
+    except httpx.ConnectError:
+        return JSONResponse(status_code=502, content={"error": "App is not running or not listening on its port"})
 
 
 @app.get("/debug/ssh")
