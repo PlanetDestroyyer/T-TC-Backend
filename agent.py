@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Query, Body
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Query, Body, HTTPException
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -453,6 +453,29 @@ def manual_emergency_shutdown():
 @app.post("/deploy")
 async def deploy_app(req: DeployRequest):
     deploy_id = await deployer.deploy(req.repo_url, req.app_name, req.app_type, req.auto_restart)
+    return {"deploy_id": deploy_id}
+
+
+@app.post("/deploy/zip")
+async def deploy_zip_upload(
+    app_name: str = Query(...),
+    app_type: str = Query(default="auto"),
+    auto_restart: bool = Query(default=True),
+    file: UploadFile = File(...),
+):
+    """Upload a ZIP file and deploy it (same flow as GitHub deploy but from local file)."""
+    import tempfile, shutil as _shutil
+    safe_name = app_name.lower().replace(" ", "-")[:32]
+    tmp_dir = tempfile.mkdtemp(prefix="tc_zip_")
+    zip_path = os.path.join(tmp_dir, "upload.zip")
+    try:
+        with open(zip_path, "wb") as f:
+            while chunk := await file.read(65536):
+                f.write(chunk)
+    except Exception as e:
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Upload failed: {e}")
+    deploy_id = await deployer.deploy_zip(zip_path, safe_name, app_type, auto_restart)
     return {"deploy_id": deploy_id}
 
 

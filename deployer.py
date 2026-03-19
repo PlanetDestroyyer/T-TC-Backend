@@ -231,6 +231,163 @@ async def deploy(repo_url: str, app_name: str, app_type: str, auto_restart: bool
     return deploy_id
 
 
+async def deploy_zip(zip_path: str, app_name: str, app_type: str, auto_restart: bool) -> str:
+    """Deploy from a ZIP file already saved on disk (uploaded via /deploy/zip)."""
+    deploy_id = uuid.uuid4().hex[:8]
+    _deployments[deploy_id] = {
+        "status": "deploying",
+        "app_name": app_name,
+        "steps": [],
+        "error": None,
+        "app_id": None,
+    }
+    asyncio.create_task(_run_deploy_zip(deploy_id, zip_path, app_name, app_type, auto_restart))
+    return deploy_id
+
+
+async def _run_deploy_zip(deploy_id: str, zip_path: str, app_name: str, app_type: str, auto_restart: bool):
+    import zipfile
+    app_dir = os.path.join(APPS_DIR, app_name)
+
+    def step(msg: str, done: bool = False, err: bool = False):
+        _deployments[deploy_id]["steps"].append({"msg": msg, "done": done, "error": err})
+        print(f"  DEPLOY [{deploy_id}]: {msg}")
+
+    try:
+        _log_activity("deploy_start", app_name, f"zip={os.path.basename(zip_path)}")
+        if os.path.exists(app_dir):
+            raise RuntimeError(f"App '{app_name}' already exists. Delete it first.")
+
+        step("Unzipping...")
+        os.makedirs(app_dir, exist_ok=True)
+        loop = asyncio.get_event_loop()
+
+        def _extract():
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                members = zf.namelist()
+                # Strip common top-level prefix (e.g. repo-main/)
+                prefix = ""
+                if members and all(m.startswith(members[0].split("/")[0] + "/") for m in members if "/" in m):
+                    top = members[0].split("/")[0] + "/"
+                    if all(m == top or m.startswith(top) for m in members):
+                        prefix = top
+                for member in members:
+                    stripped = member[len(prefix):] if prefix else member
+                    if not stripped or stripped.endswith("/"):
+                        continue
+                    dest = os.path.join(app_dir, stripped)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with zf.open(member) as src, open(dest, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+
+        await loop.run_in_executor(None, _extract)
+        try:
+            os.unlink(zip_path)
+        except OSError:
+            pass
+        step("Unzipped", done=True)
+
+        if app_type == "auto":
+            app_type = _detect_type(app_dir)
+        step(f"Framework: {app_type}", done=True)
+
+        if app_type == "script":
+            port = 0
+        else:
+            port = port_manager.allocate(app_name, app_type)
+
+        step("Downloading packages...")
+        await _install_deps(app_dir, app_type)
+        step("Packages installed", done=True)
+
+        if app_type == "script":
+            entry_path = _find_script_entry(app_dir)
+            entry_name = os.path.basename(entry_path)
+            step(f"Running {entry_name}...")
+            proc = _launch_app({"type": app_type, "app_dir": app_dir, "port": 0,
+                                 "entry_path": entry_path})
+            if not proc:
+                raise RuntimeError("Failed to launch script")
+            await asyncio.sleep(2)
+            rc = proc.poll()
+            if rc is not None and rc != 0:
+                raise RuntimeError(f"{entry_name} exited with code {rc} — check app.log for errors")
+            _pids[app_name] = {"app_pid": proc.pid}
+            running_apps[app_name] = proc.pid
+            status = "running" if rc is None else "stopped"
+            step(f"{entry_name} {'is running' if rc is None else 'completed'}", done=True)
+            reg = _load()
+            reg["apps"][app_name] = {
+                "id": app_name, "name": app_name, "type": app_type,
+                "repo_url": None, "port": 0,
+                "app_dir": app_dir, "auto_restart": auto_restart,
+                "entry_path": entry_path,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "restart_count": 0,
+                "status": status, "pid": proc.pid,
+                "tunnel_url": None, "tunnel_status": "none",
+            }
+            _save(reg)
+            _deployments[deploy_id]["app_id"] = app_name
+            _deployments[deploy_id]["status"] = "done"
+            _log_activity("deploy", app_name, f"type=script entry={entry_name} (zip)")
+            return
+
+        step("Starting server...")
+        _free_port(port)
+        proc = _launch_app({"type": app_type, "app_dir": app_dir, "port": port})
+        if not proc:
+            raise RuntimeError(f"Unknown app type: {app_type}")
+        await asyncio.sleep(8)
+        step("Server started", done=True)
+
+        _deployments[deploy_id]["app_id"] = app_name
+
+        step("Creating public URL...")
+        _deployments[deploy_id]["status"] = "waiting_host_tunnel"
+        _deployments[deploy_id]["tunnel_info"] = {"port": port}
+        ev = asyncio.Event()
+        _tunnel_events[deploy_id] = ev
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=120)
+        except asyncio.TimeoutError:
+            raise RuntimeError("Tunnel setup timed out — mobile app did not start cloudflared")
+        result = _tunnel_results.pop(deploy_id, {})
+        if result.get("error"):
+            raise RuntimeError(f"Tunnel failed: {result['error']}")
+        tunnel_url = result.get("url") or ""
+        _deployments[deploy_id]["status"] = "deploying"
+        step(f"URL: {tunnel_url or 'unavailable'}", done=True)
+
+        _pids[app_name] = {"app_pid": proc.pid}
+        running_apps[app_name] = proc.pid
+
+        reg = _load()
+        if app_name not in reg["apps"]:
+            reg["apps"][app_name] = {
+                "id": app_name, "name": app_name, "type": app_type,
+                "repo_url": None, "port": port,
+                "app_dir": app_dir, "auto_restart": auto_restart,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "restart_count": 0,
+            }
+        reg["apps"][app_name].update({
+            "status": "running", "pid": proc.pid,
+            "tunnel_url": tunnel_url,
+            "tunnel_status": "active" if tunnel_url else "dead",
+        })
+        _save(reg)
+        _deployments[deploy_id]["status"] = "done"
+        _log_activity("deploy", app_name, f"type={app_type} url={tunnel_url} (zip)")
+
+    except Exception as e:
+        msg = str(e) or f"{type(e).__name__} (no message)"
+        step(f"Error: {msg}", err=True)
+        _deployments[deploy_id]["status"] = "error"
+        _deployments[deploy_id]["error"] = msg
+        port_manager.release(app_name)
+        shutil.rmtree(app_dir, ignore_errors=True)
+        _log_activity("deploy_error", app_name, msg)
+
+
 async def update_app(app_id: str) -> str:
     """Pull latest code, reinstall deps, restart. Returns deploy_id for progress polling."""
     deploy_id = uuid.uuid4().hex[:8]
@@ -331,10 +488,10 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
         if os.path.exists(app_dir):
             raise RuntimeError(f"App '{app_name}' already exists. Delete it first.")
 
-        step("Cloning repository...")
+        step("Downloading from GitHub...")
         # Download as tarball to avoid git getcwd() ENOSYS inside proot
         await _clone_repo(repo_url, app_dir)
-        step("Repository cloned", done=True)
+        step("Downloaded", done=True)
 
         if app_type == "auto":
             app_type = _detect_type(app_dir)
@@ -344,7 +501,6 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
             port = 0  # scripts don't bind a port
         else:
             port = port_manager.allocate(app_name, app_type)
-        step(f"Port: {port if port else 'none (background script)'}", done=True)
 
         if app_type == "vite":
             # On-device Vite/React builds are not supported.
@@ -356,14 +512,15 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
                 "Please build locally (npm run build) and upload the dist/ folder via NAS."
             )
 
-        step("Installing dependencies...")
+        step("Downloading packages...")
         await _install_deps(app_dir, app_type)
-        step("Dependencies installed", done=True)
+        step("Packages installed", done=True)
 
         if app_type == "script":
             # Background scripts don't bind a port or need a public URL.
             entry_path = _find_script_entry(app_dir)
-            step(f"Launching script: {os.path.basename(entry_path)}...")
+            entry_name = os.path.basename(entry_path)
+            step(f"Running {entry_name}...")
             proc = _launch_app({"type": app_type, "app_dir": app_dir, "port": 0,
                                  "entry_path": entry_path})
             if not proc:
@@ -374,11 +531,11 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
             await asyncio.sleep(2)
             rc = proc.poll()
             if rc is not None and rc != 0:
-                raise RuntimeError(f"Script exited with code {rc} — check app.log for errors")
+                raise RuntimeError(f"{entry_name} exited with code {rc} — check app.log for errors")
             _pids[app_name] = {"app_pid": proc.pid}
             running_apps[app_name] = proc.pid
             status = "running" if rc is None else "stopped"
-            step(f"Script {'running' if rc is None else 'completed'}", done=True)
+            step(f"{entry_name} {'is running' if rc is None else 'completed'}", done=True)
 
             reg = _load()
             reg["apps"][app_name] = {
