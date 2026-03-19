@@ -340,50 +340,61 @@ async def _run_deploy(deploy_id: str, repo_url: str, app_name: str, app_type: st
             app_type = _detect_type(app_dir)
         step(f"Framework: {app_type}", done=True)
 
-        port = port_manager.allocate(app_name, app_type)
-        step(f"Port allocated: {port}", done=True)
+        if app_type == "script":
+            port = 0  # scripts don't bind a port
+        else:
+            port = port_manager.allocate(app_name, app_type)
+        step(f"Port: {port if port else 'none (background script)'}", done=True)
 
         if app_type == "vite":
-            # Vite build runs OUTSIDE the agent's proot session (fresh proot via Android app)
-            # to avoid mkdir ENOSYS from AT_FDCWD corruption.  Signal the mobile app to build.
-            # Always use pnpm — faster than yarn/npm, better retry logic, shared store.
-            pkg_manager = "pnpm"
+            # On-device Vite/React builds are not supported.
+            # Root cause: Node.js async fs (libuv statx syscall) is blocked by Android's
+            # seccomp filter → ENOSYS for mkdir/open in all package managers (pnpm, yarn, npm).
+            # Workaround: build locally and upload the dist/ folder via NAS file upload.
+            raise RuntimeError(
+                "Vite/React apps cannot be built on-device.\n"
+                "Please build locally (npm run build) and upload the dist/ folder via NAS."
+            )
 
-            # Register the app immediately so the UI can show it
+        step("Installing dependencies...")
+        await _install_deps(app_dir, app_type)
+        step("Dependencies installed", done=True)
+
+        if app_type == "script":
+            # Background scripts don't bind a port or need a public URL.
+            entry_path = _find_script_entry(app_dir)
+            step(f"Launching script: {os.path.basename(entry_path)}...")
+            proc = _launch_app({"type": app_type, "app_dir": app_dir, "port": 0,
+                                 "entry_path": entry_path})
+            if not proc:
+                raise RuntimeError("Failed to launch script")
+            # Give it a moment to start, then check exit code.
+            # A non-zero exit means the script crashed on startup.
+            # Exit code 0 (task completed) is fine — treat as success.
+            await asyncio.sleep(2)
+            rc = proc.poll()
+            if rc is not None and rc != 0:
+                raise RuntimeError(f"Script exited with code {rc} — check app.log for errors")
+            _pids[app_name] = {"app_pid": proc.pid}
+            running_apps[app_name] = proc.pid
+            status = "running" if rc is None else "stopped"
+            step(f"Script {'running' if rc is None else 'completed'}", done=True)
+
             reg = _load()
             reg["apps"][app_name] = {
                 "id": app_name, "name": app_name, "type": app_type,
-                "repo_url": repo_url, "port": port, "status": "building",
-                "pid": None, "tunnel_url": None, "tunnel_status": None,
+                "repo_url": repo_url, "port": 0,
                 "app_dir": app_dir, "auto_restart": auto_restart,
+                "entry_path": entry_path,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "restart_count": 0,
+                "status": status, "pid": proc.pid,
+                "tunnel_url": None, "tunnel_status": "none",
             }
             _save(reg)
-
-            # Store build info so mobile app knows what to build
-            _deployments[deploy_id]["build_info"] = {"app_dir": app_dir, "pkg_manager": pkg_manager}
             _deployments[deploy_id]["app_id"] = app_name
-            _deployments[deploy_id]["status"] = "waiting_host_build"
-            step(f"Waiting for device build ({pkg_manager})…", done=True)
-
-            # Wait up to 20 min for the mobile app to call /deploy/<id>/build-ready
-            event = asyncio.Event()
-            _build_events[deploy_id] = event
-            try:
-                await asyncio.wait_for(event.wait(), timeout=1200)
-            except asyncio.TimeoutError:
-                raise RuntimeError("Vite build timed out — app took too long to build on device")
-
-            result = _build_results.pop(deploy_id, {})
-            if result.get("error"):
-                raise RuntimeError(f"Device build failed: {result['error']}")
-
-            step("Build complete", done=True)
-            _deployments[deploy_id]["status"] = "deploying"
-        else:
-            step("Installing dependencies...")
-            await _install_deps(app_dir, app_type)
-            step("Dependencies installed", done=True)
+            _deployments[deploy_id]["status"] = "done"
+            _log_activity("deploy", app_name, f"type=script entry={os.path.basename(entry_path)}")
+            return
 
         step("Starting server...")
         _free_port(port)  # kill any stale process on this port (e.g. after deployer restart)
@@ -616,18 +627,6 @@ def _free_port(port: int):
 
 
 def _detect_type(app_dir: str) -> str:
-    pkg = os.path.join(app_dir, "package.json")
-    if os.path.exists(pkg):
-        with open(pkg) as f:
-            data = json.load(f)
-        all_deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
-        # Detect vite: vite.config.* present OR vite in deps/devDeps
-        vite_config = any(
-            os.path.exists(os.path.join(app_dir, f"vite.config.{ext}"))
-            for ext in ("js", "ts", "mjs", "mts")
-        )
-        if vite_config or "vite" in all_deps:
-            return "vite"
     req = os.path.join(app_dir, "requirements.txt")
     if os.path.exists(req):
         with open(req) as f:
@@ -636,6 +635,10 @@ def _detect_type(app_dir: str) -> str:
             return "fastapi"
         if "flask" in content:
             return "flask"
+    # Bare Python files without a web framework → background script runner
+    py_files = [f for f in os.listdir(app_dir) if f.endswith(".py")]
+    if py_files:
+        return "script"
     return "unknown"
 
 
@@ -644,6 +647,19 @@ def _find_module(app_dir: str) -> str:
         if os.path.exists(os.path.join(app_dir, f"{name}.py")):
             return name
     return "main"
+
+
+def _find_script_entry(app_dir: str) -> str:
+    """Return the path to the entry-point Python script for 'script' type apps."""
+    for name in ["main", "run", "app", "script", "start", "worker", "bot"]:
+        path = os.path.join(app_dir, f"{name}.py")
+        if os.path.exists(path):
+            return path
+    # Fall back to any .py file
+    for f in sorted(os.listdir(app_dir)):
+        if f.endswith(".py") and not f.startswith("_"):
+            return os.path.join(app_dir, f)
+    raise RuntimeError("No Python entry point found in repo")
 
 
 def _write_python_launcher(app_id: str, app_type: str, module: str, port: int,
@@ -693,6 +709,28 @@ mod.app.run(host="0.0.0.0", port={port})
     return path
 
 
+def _write_script_launcher(app_id: str, entry_path: str, packages_dir: str, app_dir: str) -> str:
+    """Write a launcher for bare Python scripts (no web server).
+    Patches os.getcwd before executing the script to avoid ENOSYS in proot.
+    """
+    path = f"/tmp/tc_launch_{app_id}.py"
+    content = f"""\
+import os as _o, sys
+_r = _o.getcwd
+def _g():
+    try: return _r()
+    except OSError: return {repr(app_dir)}
+_o.getcwd = _g
+sys.path[:0] = [{repr(packages_dir)}, {repr(app_dir)}]
+try: _o.chdir({repr(app_dir)})
+except OSError: pass
+exec(open({repr(entry_path)}, "rb").read(), {{"__file__": {repr(entry_path)}, "__name__": "__main__"}})
+"""
+    with open(path, "w") as f:
+        f.write(content)
+    return path
+
+
 def _write_static_server(app_id: str, build_dir: str, port: int) -> str:
     """Write a Python http.server launcher for Vite build output.
 
@@ -720,7 +758,7 @@ httpd.serve_forever()
 
 
 def _launch_app(app: dict) -> subprocess.Popen | None:
-    t, d, p = app["type"], app["app_dir"], app["port"]
+    t, d, p = app["type"], app["app_dir"], app.get("port", 0)
     py = sys.executable
     packages_dir = os.path.join(d, ".packages")
     app_id = app.get("id", os.path.basename(d))
@@ -734,10 +772,10 @@ def _launch_app(app: dict) -> subprocess.Popen | None:
         with open(log, "a") as lf:
             return subprocess.Popen([py, launcher], stdout=lf, stderr=lf, env=env)
 
-    elif t == "vite":
-        # Use Python http.server to serve the Vite build — no Node.js needed at runtime.
-        build = os.path.join(d, "build" if os.path.exists(os.path.join(d, "build")) else "dist")
-        launcher = _write_static_server(app_id, build, p)
+    elif t == "script":
+        # Background Python script — no web server, no port binding.
+        entry = app.get("entry_path") or _find_script_entry(d)
+        launcher = _write_script_launcher(app_id, entry, packages_dir, d)
         with open(log, "a") as lf:
             return subprocess.Popen([py, launcher], stdout=lf, stderr=lf, env=env)
 
@@ -1082,7 +1120,7 @@ require({json.dumps(yarn_cli)});
 
 
 async def _install_deps(app_dir: str, app_type: str):
-    if app_type in ("flask", "fastapi"):
+    if app_type in ("flask", "fastapi", "script"):
         # Install to per-app .packages/ via a getcwd-patched pip wrapper.
         # The launcher script (_write_python_launcher) puts .packages/ on sys.path.
         packages_dir = os.path.join(app_dir, ".packages")

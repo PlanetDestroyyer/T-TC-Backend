@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Query, Body
-from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mimetypes
@@ -17,6 +17,8 @@ import ssl
 import time
 import uvicorn
 import re
+import secrets
+import html as _html
 from threading import Thread
 import deployer
 
@@ -738,6 +740,530 @@ def scan_hardware():
         "tier": "Tier 1"
     }
 
+# ─── Chat rooms ──────────────────────────────────────────────────────────────
+_chat_rooms: dict = {}
+# room_id → {id, name, created_at, clients: list[WebSocket]}
+
+
+def _chat_html(room_id: str, room_name: str) -> str:
+    safe_name = _html.escape(room_name)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>{safe_name} · TinyCell Chat</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}}
+:root{{--bg:#0a0a0a;--card:#111;--card2:#181818;--border:#1e1e1e;--text:#f0f0f0;--muted:#888;--dim:#444;--blue:#4d9fff;--green:#22c55e;--red:#f43f5e;--yellow:#f59e0b}}
+body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;height:100dvh;display:flex;flex-direction:column;overflow:hidden}}
+
+/* ── Join screen ── */
+#join{{flex:1;display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto}}
+.jcard{{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:28px;width:100%;max-width:380px}}
+.jcard h2{{font-size:22px;margin-bottom:4px}}
+.jcard p{{color:var(--muted);font-size:13px;margin-bottom:20px}}
+.flabel{{display:block;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;margin:16px 0 6px}}
+.finput{{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:13px 15px;color:var(--text);font-size:15px;outline:none;transition:border-color .15s}}
+.finput:focus{{border-color:var(--blue)}}
+.jbtn{{display:block;width:100%;background:var(--blue);color:#fff;border:none;border-radius:14px;padding:15px;font-size:15px;font-weight:700;cursor:pointer;margin-top:20px;transition:opacity .15s}}
+.jbtn:disabled{{opacity:.4;cursor:default}}
+
+/* ── Chat layout ── */
+#chat{{flex:1;display:none;flex-direction:column;overflow:hidden}}
+#topbar{{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;background:var(--card);flex-shrink:0}}
+#topbar .av{{width:36px;height:36px;border-radius:50%;background:var(--blue);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}}
+#topbar .info{{flex:1;min-width:0}}
+#topbar .info strong{{display:block;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+#topbar .info small{{color:var(--muted);font-size:12px}}
+.leave-btn{{background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:10px;padding:8px 14px;font-size:13px;cursor:pointer}}
+
+/* ── Messages ── */
+#msgs{{flex:1;overflow-y:auto;padding:12px 12px 4px;display:flex;flex-direction:column;gap:2px;overscroll-behavior:contain}}
+.msg-wrap{{display:flex;flex-direction:column;padding:1px 0;position:relative;user-select:none}}
+.msg-wrap.me{{align-items:flex-end}}
+.msg-wrap.them{{align-items:flex-start}}
+.msg-wrap.sys{{align-items:center;margin:6px 0}}
+.nick-label{{font-size:11px;font-weight:600;color:var(--blue);margin:6px 0 2px 48px}}
+.msg-wrap.me .nick-label{{display:none}}
+.msg-wrap.first-in-group .nick-label{{display:block}}
+.msg-wrap.me.first-in-group .nick-label{{display:none}}
+
+/* avatar */
+.av-wrap{{position:absolute;bottom:0;left:0;width:36px;display:flex;justify-content:center}}
+.av-wrap .av-sm{{width:28px;height:28px;border-radius:50%;background:var(--card2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--blue)}}
+.msg-wrap.me .av-wrap{{display:none}}
+.msg-wrap:not(.last-in-group) .av-wrap .av-sm{{visibility:hidden}}
+
+/* bubble */
+.bubble{{position:relative;max-width:72vw;padding:9px 13px;border-radius:18px;font-size:14px;line-height:1.5;word-break:break-word;transition:transform .15s ease}}
+.msg-wrap.them .bubble{{background:var(--card);margin-left:40px;border-bottom-left-radius:4px}}
+.msg-wrap.me .bubble{{background:#1a3a5c;border-bottom-right-radius:4px}}
+.msg-wrap.them.last-in-group .bubble{{border-bottom-left-radius:4px}}
+.msg-wrap.me.last-in-group .bubble{{border-bottom-right-radius:4px}}
+.msg-wrap.sys .bubble{{background:transparent;color:var(--dim);font-size:12px;padding:4px 8px}}
+.bubble .err{{color:var(--red);font-style:italic}}
+
+/* timestamp */
+.ts{{font-size:10px;color:var(--dim);margin-top:2px;padding:0 2px}}
+.msg-wrap.me .ts{{text-align:right}}
+
+/* ── Reply quote in bubble ── */
+.reply-quote{{background:rgba(255,255,255,.06);border-left:3px solid var(--blue);border-radius:8px 8px 0 0;padding:6px 10px;margin:-2px -4px 8px;cursor:pointer}}
+.reply-quote .rq-nick{{font-size:11px;font-weight:700;color:var(--blue);margin-bottom:2px}}
+.reply-quote .rq-text{{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.msg-wrap.me .reply-quote .rq-nick{{color:#7bb8ff}}
+.reply-quote.unknown .rq-text{{font-style:italic}}
+
+/* swipe-to-reply indicator */
+.reply-indicator{{position:absolute;display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:var(--blue);opacity:0;transition:opacity .1s;pointer-events:none;top:50%;transform:translateY(-50%)}}
+.msg-wrap.them .reply-indicator{{right:-40px}}
+.msg-wrap.me  .reply-indicator{{left:-40px}}
+.reply-indicator svg{{width:16px;height:16px;fill:#fff}}
+
+/* highlight flash when scrolled-to */
+.bubble.flash{{animation:flash .6s ease}}
+@keyframes flash{{0%,100%{{background:inherit}}40%{{background:rgba(77,159,255,.35)}}}}
+
+/* ── Reply bar above input ── */
+#reply-bar{{display:none;padding:8px 14px;background:var(--card);border-top:1px solid var(--border);flex-direction:row;align-items:center;gap:10px}}
+#reply-bar.visible{{display:flex}}
+#reply-bar .rb-line{{flex:1;border-left:3px solid var(--blue);padding-left:10px;min-width:0}}
+#reply-bar .rb-nick{{font-size:11px;font-weight:700;color:var(--blue);margin-bottom:2px}}
+#reply-bar .rb-text{{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+#reply-bar .rb-x{{color:var(--muted);font-size:20px;cursor:pointer;padding:0 4px;line-height:1;flex-shrink:0}}
+
+/* ── Input row ── */
+#inputrow{{padding:10px 12px;padding-bottom:max(10px,env(safe-area-inset-bottom));border-top:1px solid var(--border);display:flex;gap:8px;background:var(--card);flex-shrink:0;align-items:flex-end}}
+#msgInput{{flex:1;background:var(--card2);border:1px solid var(--border);border-radius:22px;padding:10px 16px;color:var(--text);font-size:15px;outline:none;resize:none;max-height:120px;overflow-y:auto;line-height:1.4;font-family:inherit}}
+#msgInput:focus{{border-color:var(--blue)}}
+.send-btn{{width:42px;height:42px;border-radius:50%;background:var(--blue);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s}}
+.send-btn:disabled{{opacity:.4}}
+.send-btn svg{{width:20px;height:20px;fill:#fff;transform:translateX(1px)}}
+</style>
+</head>
+<body>
+
+<!-- Join screen -->
+<div id="join">
+  <div class="jcard">
+    <h2>💬 {safe_name}</h2>
+    <p>End-to-end encrypted · hosted on this phone</p>
+    <span class="flabel">Your nickname</span>
+    <input class="finput" id="nick" type="text" placeholder="Anonymous" maxlength="24"
+           autocomplete="off" autocorrect="off" spellcheck="false">
+    <span class="flabel">Room password</span>
+    <input class="finput" id="pass" type="password" placeholder="Shared room password"
+           autocomplete="new-password">
+    <button class="jbtn" id="joinBtn" onclick="joinRoom()">Join Room →</button>
+  </div>
+</div>
+
+<!-- Chat screen -->
+<div id="chat">
+  <div id="topbar">
+    <div class="av">💬</div>
+    <div class="info">
+      <strong>{safe_name}</strong>
+      <small id="peerCount">connecting…</small>
+    </div>
+    <button class="leave-btn" onclick="disconnect()">Leave</button>
+  </div>
+  <div id="msgs"></div>
+  <div id="reply-bar">
+    <div class="rb-line">
+      <div class="rb-nick" id="rb-nick"></div>
+      <div class="rb-text" id="rb-text"></div>
+    </div>
+    <span class="rb-x" onclick="cancelReply()">✕</span>
+  </div>
+  <div id="inputrow">
+    <textarea id="msgInput" rows="1" placeholder="Message…" maxlength="4000"
+              autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+    <button class="send-btn" id="sendBtn" onclick="sendMsg()">
+      <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+    </button>
+  </div>
+</div>
+
+<script>
+const ROOM_ID = {json.dumps(room_id)};
+const ROOM_NAME = {json.dumps(room_name)};
+let _key=null, _nick='Anonymous', _ws=null;
+let _replyTo=null;      // {{id, nick, plaintext}}
+const _msgs={{}};        // id → {{el, plaintext, nick}}
+
+// ── Crypto ──────────────────────────────────────────────────────────────────
+async function deriveKey(pw,roomId){{
+  const e=new TextEncoder();
+  const km=await crypto.subtle.importKey('raw',e.encode(pw),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {{name:'PBKDF2',salt:e.encode(roomId),iterations:100000,hash:'SHA-256'}},
+    km,{{name:'AES-GCM',length:256}},false,['encrypt','decrypt']);
+}}
+async function enc(key,text){{
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const buf=await crypto.subtle.encrypt({{name:'AES-GCM',iv}},key,new TextEncoder().encode(text));
+  const out=new Uint8Array(12+buf.byteLength);
+  out.set(iv);out.set(new Uint8Array(buf),12);
+  return btoa(String.fromCharCode(...out));
+}}
+async function dec(key,b64){{
+  const bytes=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));
+  const buf=await crypto.subtle.decrypt({{name:'AES-GCM',iv:bytes.slice(0,12)}},key,bytes.slice(12));
+  return new TextDecoder().decode(buf);
+}}
+function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}}
+function uid(){{return Math.random().toString(36).slice(2,10)}}
+function fmtTime(ts){{const d=new Date(ts);return d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')}}
+
+// ── Message rendering ────────────────────────────────────────────────────────
+let _lastNick='', _lastTs=0;
+
+function addSys(text){{
+  const w=document.createElement('div');
+  w.className='msg-wrap sys';
+  w.innerHTML='<div class="bubble">'+esc(text)+'</div>';
+  document.getElementById('msgs').appendChild(w);
+  scrollBottom();
+}}
+
+function addBubble({{id,nick,text,ts,replyNick,replyText,isMe,err}}){{
+  const msgs=document.getElementById('msgs');
+  const now=Date.now();
+  const gap=(now-_lastTs)>120000; // >2 min gap → new group
+  const sameNick=nick===_lastNick&&!gap;
+  _lastNick=nick; _lastTs=ts||now;
+
+  // Mark previous last-in-group as no longer last
+  const prev=msgs.lastElementChild;
+  if(prev&&!prev.classList.contains('sys')){{
+    prev.classList.remove('last-in-group');
+    prev.querySelector('.ts')&&(prev.querySelector('.ts').style.display='none');
+  }}
+
+  const w=document.createElement('div');
+  const cls=isMe?'me':'them';
+  w.className='msg-wrap '+cls+' last-in-group'+(sameNick?'':' first-in-group');
+  w.dataset.id=id||'';
+
+  // Avatar (left side, "them" only)
+  if(!isMe){{
+    const avWrap=document.createElement('div');
+    avWrap.className='av-wrap';
+    const av=document.createElement('div');
+    av.className='av-sm';
+    av.textContent=(nick||'?')[0].toUpperCase();
+    avWrap.appendChild(av);
+    w.appendChild(avWrap);
+  }}
+
+  // Nick label (shown for first-in-group, "them" only)
+  if(!isMe){{
+    const nl=document.createElement('div');
+    nl.className='nick-label';
+    nl.textContent=nick;
+    w.appendChild(nl);
+  }}
+
+  // Bubble
+  const b=document.createElement('div');
+  b.className='bubble';
+
+  // Reply quote
+  if(replyNick!==undefined){{
+    const rq=document.createElement('div');
+    rq.className='reply-quote'+(replyText===null?' unknown':'');
+    rq.innerHTML='<div class="rq-nick">'+esc(replyNick)+'</div><div class="rq-text">'+(replyText!==null?esc(replyText):'🔒 Encrypted')+'</div>';
+    if(replyText!==null){{
+      // find original and scroll on click
+      rq.style.cursor='pointer';
+      rq.addEventListener('click',()=>scrollToMsg(w.dataset.replyId));
+    }}
+    b.appendChild(rq);
+  }}
+
+  // Text
+  const tb=document.createElement('div');
+  if(err){{ tb.innerHTML='<span class="err">🔒 Encrypted (wrong password)</span>'; }}
+  else{{ tb.textContent=text; }}
+  b.appendChild(tb);
+
+  // Swipe-to-reply indicator icon
+  const ri=document.createElement('div');
+  ri.className='reply-indicator';
+  ri.innerHTML='<svg viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>';
+  b.appendChild(ri);
+
+  w.appendChild(b);
+
+  // Timestamp
+  const tsel=document.createElement('div');
+  tsel.className='ts';
+  tsel.textContent=fmtTime(ts||now);
+  tsel.style.display='block';
+  w.appendChild(tsel);
+
+  msgs.appendChild(w);
+  if(id){{ _msgs[id]={{el:w, plaintext:text, nick}}; }}
+  attachSwipe(w,b,ri,id,nick,text,isMe);
+  scrollBottom();
+  return w;
+}}
+
+// ── Swipe-to-reply ───────────────────────────────────────────────────────────
+function attachSwipe(wrap,bubble,indicator,msgId,msgNick,plaintext,isMe){{
+  if(wrap.classList.contains('sys')) return;
+  let tx=0,ty=0,swiping=false,triggered=false;
+
+  function onStart(cx,cy){{tx=cx;ty=cy;swiping=true;triggered=false;bubble.style.transition='none';}}
+  function onMove(cx,cy){{
+    if(!swiping) return;
+    const dx=cx-tx, dy=cy-ty;
+    if(Math.abs(dy)>Math.abs(dx)+10){{swiping=false;reset();return;}}
+    // Right swipe for "them", left swipe for "me" (mirror WhatsApp/iMessage)
+    const pull=isMe?-dx:dx;
+    if(pull<0){{reset();return;}}
+    const off=Math.min(pull,80);
+    bubble.style.transform='translateX('+(isMe?-off:off)+'px)';
+    indicator.style.opacity=String(Math.min(off/60,1));
+    if(off>=60&&!triggered){{triggered=true;haptic();}}
+  }}
+  function onEnd(cx){{
+    if(!swiping) return;
+    swiping=false;
+    const pull=isMe?-(cx-tx):(cx-tx);
+    reset();
+    if(pull>=60) setReply(msgId,msgNick,plaintext);
+  }}
+  function reset(){{
+    bubble.style.transition='transform .2s ease';
+    bubble.style.transform='';
+    indicator.style.opacity='0';
+    setTimeout(()=>bubble.style.transition='',200);
+  }}
+
+  // Touch
+  wrap.addEventListener('touchstart',e=>{{const t=e.touches[0];onStart(t.clientX,t.clientY);}},{{passive:true}});
+  wrap.addEventListener('touchmove',e=>{{const t=e.touches[0];onMove(t.clientX,t.clientY);}},{{passive:true}});
+  wrap.addEventListener('touchend',e=>{{const t=e.changedTouches[0];onEnd(t.clientX);}});
+  // Mouse (desktop)
+  wrap.addEventListener('mousedown',e=>{{onStart(e.clientX,e.clientY);}});
+  wrap.addEventListener('mousemove',e=>{{if(e.buttons===1) onMove(e.clientX,e.clientY);}});
+  wrap.addEventListener('mouseup',e=>{{onEnd(e.clientX);}});
+  wrap.addEventListener('mouseleave',()=>{{if(swiping){{swiping=false;reset();}}}});
+}}
+
+function haptic(){{try{{navigator.vibrate&&navigator.vibrate(30);}}catch{{}}}}
+
+function setReply(id,nick,text){{
+  _replyTo={{id,nick,text}};
+  const bar=document.getElementById('reply-bar');
+  bar.classList.add('visible');
+  document.getElementById('rb-nick').textContent='↩ '+nick;
+  document.getElementById('rb-text').textContent=text||'';
+  document.getElementById('msgInput').focus();
+}}
+function cancelReply(){{
+  _replyTo=null;
+  document.getElementById('reply-bar').classList.remove('visible');
+}}
+
+function scrollToMsg(id){{
+  const rec=_msgs[id];
+  if(!rec) return;
+  rec.el.scrollIntoView({{behavior:'smooth',block:'center'}});
+  rec.el.querySelector('.bubble').classList.remove('flash');
+  void rec.el.querySelector('.bubble').offsetWidth;
+  rec.el.querySelector('.bubble').classList.add('flash');
+}}
+
+function scrollBottom(){{
+  const m=document.getElementById('msgs');
+  m.scrollTop=m.scrollHeight;
+}}
+
+// ── Join ─────────────────────────────────────────────────────────────────────
+async function joinRoom(){{
+  const pw=document.getElementById('pass').value;
+  const nv=document.getElementById('nick').value.trim()||'Anonymous';
+  if(!pw){{alert('Enter the room password');return;}}
+  document.getElementById('joinBtn').disabled=true;
+  try{{_key=await deriveKey(pw,ROOM_ID);_nick=nv;}}
+  catch(e){{alert('Crypto error: '+e.message);document.getElementById('joinBtn').disabled=false;return;}}
+
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  _ws=new WebSocket(proto+'//'+location.host+'/ws/chat/'+ROOM_ID);
+
+  _ws.onopen=()=>{{
+    document.getElementById('join').style.display='none';
+    document.getElementById('chat').style.display='flex';
+    document.getElementById('peerCount').textContent='🔒 E2EE · connected';
+    document.getElementById('msgInput').focus();
+    addSys('🔒 Messages are end-to-end encrypted. The server cannot read them.');
+  }};
+
+  _ws.onmessage=async(evt)=>{{
+    try{{
+      const pkt=JSON.parse(evt.data);
+      if(!pkt.ct) return;
+      let plain=null,err=false;
+      try{{plain=await dec(_key,pkt.ct);}}catch{{err=true;}}
+      // Decrypt reply preview if present
+      let replyNick=undefined,replyText=undefined;
+      if(pkt.reply_nick!==undefined){{
+        replyNick=pkt.reply_nick;
+        if(pkt.reply_ct){{
+          try{{replyText=await dec(_key,pkt.reply_ct);}}catch{{replyText=null;}}
+        }}else{{replyText=null;}}
+      }}
+      const w=addBubble({{
+        id:pkt.id,nick:pkt.nick||'?',text:plain,ts:pkt.ts,
+        replyNick,replyText,isMe:false,err
+      }});
+      if(pkt.reply_id) w.dataset.replyId=pkt.reply_id;
+    }}catch{{/* malformed */}}
+  }};
+
+  _ws.onerror=()=>addSys('⚠ Connection error');
+  _ws.onclose=()=>{{addSys('Disconnected');document.getElementById('peerCount').textContent='disconnected';}};
+}}
+
+// ── Send ─────────────────────────────────────────────────────────────────────
+async function sendMsg(){{
+  const input=document.getElementById('msgInput');
+  const text=input.value.trim();
+  if(!text||!_ws||_ws.readyState!==1) return;
+  input.value='';autoResize();
+  document.getElementById('sendBtn').disabled=true;
+  try{{
+    const ct=await enc(_key,text);
+    const pkt={{id:uid(),ct,nick:_nick,ts:Date.now()}};
+    // Include reply if active
+    if(_replyTo){{
+      pkt.reply_id=_replyTo.id;
+      pkt.reply_nick=_replyTo.nick;
+      if(_replyTo.text) pkt.reply_ct=await enc(_key,_replyTo.text.slice(0,200));
+      cancelReply();
+    }}
+    _ws.send(JSON.stringify(pkt));
+    const w=addBubble({{
+      id:pkt.id,nick:_nick,text,ts:pkt.ts,
+      replyNick:pkt.reply_nick,replyText:_replyTo?.text,isMe:true
+    }});
+    if(pkt.reply_id) w.dataset.replyId=pkt.reply_id;
+  }}catch(e){{addSys('⚠ Send failed: '+e.message);}}
+  finally{{document.getElementById('sendBtn').disabled=false;}}
+}}
+
+function disconnect(){{
+  if(_ws)_ws.close();
+  document.getElementById('chat').style.display='none';
+  document.getElementById('join').style.display='flex';
+  document.getElementById('joinBtn').disabled=false;
+  _key=null;_lastNick='';_lastTs=0;
+  document.getElementById('msgs').innerHTML='';
+  cancelReply();
+}}
+
+// ── Input auto-resize ────────────────────────────────────────────────────────
+function autoResize(){{
+  const t=document.getElementById('msgInput');
+  t.style.height='auto';
+  t.style.height=Math.min(t.scrollHeight,120)+'px';
+}}
+document.addEventListener('DOMContentLoaded',()=>{{
+  const inp=document.getElementById('msgInput');
+  inp.addEventListener('input',autoResize);
+  inp.addEventListener('keydown',e=>{{
+    if(e.key==='Enter'&&!e.shiftKey){{e.preventDefault();sendMsg();}}
+  }});
+  // Escape cancels reply
+  document.addEventListener('keydown',e=>{{if(e.key==='Escape')cancelReply();}});
+}});
+</script>
+</body>
+</html>"""
+
+
+# ─── Chat endpoints ───────────────────────────────────────────────────────────
+
+@app.post("/chat/rooms")
+async def create_chat_room(req: Request):
+    body = await req.json()
+    name = (_html.escape(str(body.get("name") or "room")[:32].strip())) or "room"
+    room_id = secrets.token_urlsafe(8)
+    _chat_rooms[room_id] = {
+        "id": room_id, "name": name,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "clients": [],
+    }
+    return {"room_id": room_id, "name": name}
+
+
+@app.get("/chat/rooms")
+async def list_chat_rooms():
+    return [
+        {"id": r["id"], "name": r["name"],
+         "created_at": r["created_at"], "participants": len(r["clients"])}
+        for r in _chat_rooms.values()
+    ]
+
+
+@app.delete("/chat/rooms/{room_id}")
+async def delete_chat_room(room_id: str):
+    room = _chat_rooms.pop(room_id, None)
+    if room:
+        for ws in list(room["clients"]):
+            try:
+                await ws.close()
+            except Exception:
+                pass
+    return {"ok": True}
+
+
+@app.get("/chat/room/{room_id}", response_class=HTMLResponse)
+async def chat_room_page(room_id: str):
+    room = _chat_rooms.get(room_id)
+    if not room:
+        return HTMLResponse(
+            "<h1 style='font-family:sans-serif;color:#f43f5e;padding:32px'>Room not found or expired</h1>",
+            status_code=404,
+        )
+    return HTMLResponse(_chat_html(room_id, room["name"]))
+
+
+@app.websocket("/ws/chat/{room_id}")
+async def ws_chat(websocket: WebSocket, room_id: str):
+    room = _chat_rooms.get(room_id)
+    if not room:
+        await websocket.close(code=4004)
+        return
+    await websocket.accept()
+    room["clients"].append(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            dead = []
+            for client in list(room["clients"]):
+                if client is websocket:
+                    continue
+                try:
+                    await client.send_text(data)
+                except Exception:
+                    dead.append(client)
+            for ws in dead:
+                try:
+                    room["clients"].remove(ws)
+                except ValueError:
+                    pass
+    except WebSocketDisconnect:
+        try:
+            room["clients"].remove(websocket)
+        except ValueError:
+            pass
+
+
 # --- WebSocket for Real-Time Stats ---
 @app.websocket("/ws/status")
 async def websocket_status(websocket: WebSocket):
@@ -1269,6 +1795,178 @@ def list_files(path: str):
             return JSONResponse(status_code=403, content={"error": "Permission denied"})
         return {"path": path, "items": items}
     return JSONResponse(status_code=404, content={"error": "Not found"})
+
+
+# ── Cloudflare Tunnel Management (Named + Quick Tunnel) ──────────────────────
+
+_CF_DIR        = os.path.expanduser("~/.tinycell")
+_CF_CREDS_PATH = os.path.join(_CF_DIR, "cf_credentials.json")
+_CF_CONFIG_PATH= os.path.join(_CF_DIR, "cf_config.yaml")
+_CF_ACCT_PATH  = os.path.join(_CF_DIR, "account.json")
+_CF_LOG_PATH   = os.path.join(_CF_DIR, "tunnel.log")
+_cf_proc: "subprocess.Popen | None" = None
+_cf_quick_url: "str | None" = None   # populated when running in quick-tunnel mode
+
+
+def _cf_running() -> bool:
+    return _cf_proc is not None and _cf_proc.poll() is None
+
+
+def _cf_account() -> "dict | None":
+    if os.path.exists(_CF_ACCT_PATH):
+        with open(_CF_ACCT_PATH) as f:
+            return json.load(f)
+    return None
+
+
+def _find_cf_bin() -> "str | None":
+    cf = shutil.which("cloudflared")
+    if cf:
+        return cf
+    for p in [
+        os.path.expanduser("~/bin/cloudflared"),
+        "/usr/local/bin/cloudflared",
+        "/usr/bin/cloudflared",
+    ]:
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def _watch_quick_url(proc: "subprocess.Popen") -> None:
+    """Background thread: reads cloudflared stdout line-by-line and captures
+    the trycloudflare.com URL that Quick Tunnel prints on startup."""
+    global _cf_quick_url
+    import re
+    url_re = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+    try:
+        for line in proc.stdout:                          # type: ignore[union-attr]
+            with open(_CF_LOG_PATH, "a") as lf:
+                lf.write(line)
+            m = url_re.search(line)
+            if m:
+                _cf_quick_url = m.group(0)
+    except Exception:
+        pass
+
+
+@app.post("/tunnel/setup")
+async def cf_tunnel_setup(req: Request):
+    """Save tunnel credentials + config from the app after account creation."""
+    body = await req.json()
+    credentials = body.get("credentials")
+    config       = body.get("config")
+    username     = body.get("username")
+    url          = body.get("url")
+
+    if not all([credentials, config, username, url]):
+        return JSONResponse(status_code=400, content={"error": "credentials, config, username, url required"})
+
+    os.makedirs(_CF_DIR, exist_ok=True)
+
+    with open(_CF_CREDS_PATH, "w") as f:
+        json.dump(credentials, f, indent=2)
+
+    # Replace relative "credentials.json" with absolute path so cloudflared
+    # can be run from any working directory.
+    cfg_text = config.replace("credentials.json", _CF_CREDS_PATH)
+    with open(_CF_CONFIG_PATH, "w") as f:
+        f.write(cfg_text)
+
+    with open(_CF_ACCT_PATH, "w") as f:
+        json.dump({"username": username, "url": url}, f)
+
+    return {"ok": True}
+
+
+@app.post("/tunnel/start")
+async def cf_tunnel_start():
+    """Start cloudflared.
+    - Named Tunnel mode  (permanent URL) if credentials are saved.
+    - Quick Tunnel mode  (temp trycloudflare.com URL) otherwise — no account needed.
+    """
+    global _cf_proc, _cf_quick_url
+
+    if _cf_running():
+        return {"ok": True, "status": "already_running", "pid": _cf_proc.pid}
+
+    cf_bin = _find_cf_bin()
+    if not cf_bin:
+        return JSONResponse(status_code=500, content={
+            "error": "cloudflared not found. Install via: pkg install cloudflared"
+        })
+
+    os.makedirs(_CF_DIR, exist_ok=True)
+
+    named_mode = os.path.exists(_CF_CONFIG_PATH)
+
+    if named_mode:
+        # ── Named Tunnel — permanent URL ─────────────────────────────────────
+        log_f = open(_CF_LOG_PATH, "w", buffering=1)
+        _cf_proc = subprocess.Popen(
+            [cf_bin, "tunnel", "--config", _CF_CONFIG_PATH, "run"],
+            stdout=log_f, stderr=subprocess.STDOUT,
+        )
+        return {"ok": True, "mode": "named", "status": "started", "pid": _cf_proc.pid}
+    else:
+        # ── Quick Tunnel — temporary trycloudflare.com URL ───────────────────
+        _cf_quick_url = None
+        open(_CF_LOG_PATH, "w").close()   # clear log
+        _cf_proc = subprocess.Popen(
+            [cf_bin, "tunnel", "--url", "http://localhost:8000"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        # Watch stdout in background thread to capture the URL
+        t = Thread(target=_watch_quick_url, args=(_cf_proc,), daemon=True)
+        t.start()
+        return {"ok": True, "mode": "quick", "status": "started", "pid": _cf_proc.pid}
+
+
+@app.post("/tunnel/stop")
+async def cf_tunnel_stop():
+    """Stop the cloudflared tunnel process."""
+    global _cf_proc, _cf_quick_url
+
+    if _cf_proc:
+        _cf_proc.terminate()
+        try:
+            _cf_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _cf_proc.kill()
+        _cf_proc = None
+    _cf_quick_url = None
+
+    return {"ok": True}
+
+
+@app.get("/tunnel/status")
+async def cf_tunnel_status():
+    """Return tunnel running state, mode, and public URL."""
+    acct  = _cf_account()
+    named = os.path.exists(_CF_CONFIG_PATH)
+    # Named tunnel URL comes from saved account; quick tunnel URL parsed from output
+    url = (acct.get("url") if acct else None) if named else _cf_quick_url
+    return {
+        "running":    _cf_running(),
+        "pid":        _cf_proc.pid if _cf_running() else None,
+        "mode":       "named" if named else "quick",
+        "configured": named,
+        "username":   acct.get("username") if acct else None,
+        "url":        url,
+        "url_ready":  url is not None,
+    }
+
+
+@app.get("/tunnel/logs")
+async def cf_tunnel_logs(lines: int = 80):
+    """Return last N lines of cloudflared output."""
+    if not os.path.exists(_CF_LOG_PATH):
+        return {"logs": ""}
+    with open(_CF_LOG_PATH) as f:
+        all_lines = f.readlines()
+    return {"logs": "".join(all_lines[-lines:])}
+
 
 def run_https_server():
     """Run HTTPS server for browser access"""
