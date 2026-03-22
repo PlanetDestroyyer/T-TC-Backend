@@ -226,6 +226,7 @@ async def deploy(repo_url: str, app_name: str, app_type: str, auto_restart: bool
         "steps": [],
         "error": None,
         "app_id": None,
+        "started_at": time.time(),
     }
     asyncio.create_task(_run_deploy(deploy_id, repo_url, app_name, app_type, auto_restart))
     return deploy_id
@@ -240,6 +241,7 @@ async def deploy_zip(zip_path: str, app_name: str, app_type: str, auto_restart: 
         "steps": [],
         "error": None,
         "app_id": None,
+        "started_at": time.time(),
     }
     asyncio.create_task(_run_deploy_zip(deploy_id, zip_path, app_name, app_type, auto_restart))
     return deploy_id
@@ -397,6 +399,7 @@ async def update_app(app_id: str) -> str:
         "steps": [],
         "error": None,
         "app_id": app_id,
+        "started_at": time.time(),
     }
     asyncio.create_task(_run_update(deploy_id, app_id))
     return deploy_id
@@ -685,6 +688,15 @@ async def monitor_loop():
         if changed:
             _save(reg)
 
+        # ── Prune finished deployments older than 1 hour ──────────────────────
+        cutoff = time.time() - 3600
+        stale = [
+            did for did, d in list(_deployments.items())
+            if d.get("status") in ("done", "error") and d.get("started_at", 0) < cutoff
+        ]
+        for did in stale:
+            _deployments.pop(did, None)
+
 
 def shutdown_all():
     """Kill every running app and tunnel immediately."""
@@ -714,6 +726,7 @@ async def update_all_apps() -> None:
             "steps": [],
             "error": None,
             "app_id": app_id,
+            "started_at": time.time(),
         }
         tasks.append(_run_update(deploy_id, app_id))
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -1086,13 +1099,6 @@ async def _run_async(cmd: list[str], timeout: int = 120) -> str:
 
 # ─── Dependency installation ──────────────────────────────────────────────────
 
-# ─── Dependency installation ──────────────────────────────────────────────────
-
-def _patch_requirements(req_path: str):
-    """(Deprecated) Previously used to rewrite requirements.txt to replace Rust-dependent packages. 
-    No longer necessary on Debian glibc since manylinux wheels are available."""
-    pass
-
 
 def _write_pip_wrapper(packages_dir: str, req_path: str) -> str:
     """Write a pip wrapper script that patches os.getcwd before pip is imported.
@@ -1284,7 +1290,6 @@ async def _install_deps(app_dir: str, app_type: str):
         os.makedirs(packages_dir, exist_ok=True)
         req = os.path.join(app_dir, "requirements.txt")
         if os.path.exists(req):
-            _patch_requirements(req)
             wrapper = _write_pip_wrapper(packages_dir, req)
             try:
                 await _run_async([sys.executable, wrapper], timeout=600)
@@ -1293,61 +1298,3 @@ async def _install_deps(app_dir: str, app_type: str):
                     try: os.unlink(p)
                     except OSError: pass
 
-    elif app_type == "vite":
-        node_bin = "/usr/bin/node"
-        if not os.path.exists(node_bin):
-            raise RuntimeError("nodejs not found — reinstall TinyCell app to re-run bootstrap")
-
-        # Auto-detect package manager: prefer the lockfile that's already in the repo.
-        # Using the wrong one causes "package-lock.json found" warnings and can break installs.
-        has_package_lock = os.path.exists(os.path.join(app_dir, "package-lock.json"))
-        has_pnpm_lock    = os.path.exists(os.path.join(app_dir, "pnpm-lock.yaml"))
-        use_npm = has_package_lock and not has_pnpm_lock
-
-        os.makedirs(os.path.join(app_dir, "node_modules"), exist_ok=True)
-
-        if use_npm:
-            # npm path — wrap to patch process.cwd / recursive mkdir (proot ENOSYS fixes).
-            npm_bin = "/usr/bin/npm"
-            if not os.path.exists(npm_bin):
-                raise RuntimeError("npm not found — reinstall TinyCell app to re-run bootstrap")
-            install_wrapper = _write_npm_wrapper(app_dir, [
-                "--prefix", app_dir,
-                "--cache", os.path.join(app_dir, ".npm-cache"),
-                "--no-audit", "--no-fund",
-                "install",
-            ])
-            await _run_async([node_bin, install_wrapper], timeout=900)
-
-            build_wrapper = _write_npm_wrapper(app_dir, [
-                "--prefix", app_dir,
-                "run", "build",
-            ])
-            await _run_async([node_bin, build_wrapper], timeout=900)
-
-        else:
-            # pnpm path
-            # Need to ensure pnpm is installed via npm since it's not in Alpine apk
-            import shutil
-            if not shutil.which("pnpm") and not os.path.exists("/usr/lib/node_modules/pnpm/bin/pnpm.cjs") and                not os.path.exists("/usr/local/lib/node_modules/pnpm/bin/pnpm.cjs"):
-                print("Installing pnpm globally via npm...")
-                install_pnpm = _write_npm_wrapper("/tmp", [
-                    "install", "-g", "pnpm"
-                ])
-                await _run_async([node_bin, install_pnpm], timeout=600)
-            
-            pnpm_cache = os.path.join(app_dir, ".pnpm-store")
-            os.makedirs(pnpm_cache, exist_ok=True)
-
-            install_wrapper = _write_pnpm_wrapper(app_dir, [
-                "--dir", app_dir,
-                "--store-dir", pnpm_cache,
-                "install",
-            ])
-            await _run_async([node_bin, install_wrapper], timeout=900)
-
-            build_wrapper = _write_pnpm_wrapper(app_dir, [
-                "--dir", app_dir,
-                "run", "build",
-            ])
-            await _run_async([node_bin, build_wrapper], timeout=900)

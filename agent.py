@@ -450,20 +450,37 @@ def manual_emergency_shutdown():
     return {"killed": killed, "message": f"Stopped {len(killed)} app(s)"}
 
 
+# ── Deploy rate-limit: max 1 deploy per 15s per IP ──────────────────────────
+_deploy_last: dict[str, float] = {}
+_DEPLOY_COOLDOWN = 15.0  # seconds
+
+def _check_deploy_rate(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    last = _deploy_last.get(ip, 0.0)
+    if now - last < _DEPLOY_COOLDOWN:
+        wait = int(_DEPLOY_COOLDOWN - (now - last)) + 1
+        raise HTTPException(status_code=429, detail=f"Too many deploys. Wait {wait}s.")
+    _deploy_last[ip] = now
+
+
 @app.post("/deploy")
-async def deploy_app(req: DeployRequest):
+async def deploy_app(req: DeployRequest, request: Request):
+    _check_deploy_rate(request)
     deploy_id = await deployer.deploy(req.repo_url, req.app_name, req.app_type, req.auto_restart)
     return {"deploy_id": deploy_id}
 
 
 @app.post("/deploy/zip")
 async def deploy_zip_upload(
+    request: Request,
     app_name: str = Query(...),
     app_type: str = Query(default="auto"),
     auto_restart: bool = Query(default=True),
     file: UploadFile = File(...),
 ):
     """Upload a ZIP file and deploy it (same flow as GitHub deploy but from local file)."""
+    _check_deploy_rate(request)
     import tempfile, shutil as _shutil
     safe_name = app_name.lower().replace(" ", "-")[:32]
     tmp_dir = tempfile.mkdtemp(prefix="tc_zip_")
@@ -1735,15 +1752,22 @@ def nas_browse(root: str = Query(...), path: str = Query(default="")):
     try:
         for entry in os.scandir(target):
             try:
-                stat = entry.stat(follow_symlinks=False)
+                stat = entry.stat(follow_symlinks=True)
                 items.append({
                     "name": entry.name,
-                    "is_dir": entry.is_dir(follow_symlinks=False),
-                    "size": stat.st_size if not entry.is_dir() else 0,
+                    "is_dir": entry.is_dir(follow_symlinks=True),
+                    "size": stat.st_size if not entry.is_dir(follow_symlinks=True) else 0,
                     "modified": int(stat.st_mtime),
                 })
-            except (PermissionError, OSError):
-                continue
+            except (PermissionError, OSError) as e:
+                # Include unreadable entries so the client can see them (size -1 = stat failed)
+                items.append({
+                    "name": entry.name,
+                    "is_dir": False,
+                    "size": -1,
+                    "modified": 0,
+                    "error": str(e),
+                })
     except PermissionError:
         return JSONResponse(status_code=403, content={"error": "Permission denied"})
     except OSError as e:
