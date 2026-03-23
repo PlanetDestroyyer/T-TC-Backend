@@ -326,6 +326,7 @@ def get_system_stats():
         "disk": disk_info,
         "temperature": temp,
         "thermal_level": _thermal_level(temp),
+        "local_ip": get_device_ip(),
     }
 
 class DeployRequest(BaseModel):
